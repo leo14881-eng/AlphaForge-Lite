@@ -13,6 +13,13 @@ price_volume_divergent，而不是像 test_state_machine_engine.py 里那样
     测试二 · 类 LUNA / "币安人生" 式真实崩溃前夜：过滤网一、过滤网二
         均通过，且连续 2 个时间步都确认为真（过滤网三）——系统必须
         打破常规迟滞，前瞻性强制迁移至 EXIT。
+
+    测试三 · 庄家暴力砸盘式恶性洗盘（价格暴砸 + 相对强度未崩 + 低换手
+        缩量）：与测试一是两种不同的洗盘手法——测试一是"价格仍创新高但
+        动能已经在走弱"，测试三是"价格直接剧烈下砸恐吓筹码，但相对强度
+        大趋势根本没崩、换手率也没放大"。这种场景下过滤网一的前提条件
+        （最近 N 期创新高）从源头就不成立，背离信号不会被触发，系统同样
+        必须稳稳持仓不为所动。
 """
 from state_machine.constants import LifecycleStage as Stage
 from state_machine.engine import StateMachineEngine
@@ -96,3 +103,39 @@ def test_divergence_real_breakdown_forces_exit_before_crash():
     assert engine.last_transition.from_stage == Stage.LEADERSHIP
     assert engine.last_transition.to_stage == Stage.EXIT
     assert "量价背离" in engine.last_transition.reason
+
+
+def test_divergence_violent_down_spike_shakeout_holds_position():
+    """
+    测试三：庄家暴力砸盘式恶性洗盘——价格剧烈下砸（不是创新高，而是
+    直接砸出一根大阴线恐吓筹码），相对强度大趋势并未崩溃（delta2_rs
+    始终维持在正值区间，没有断崖下穿零轴），换手率也始终萎缩（不拥挤）。
+    过滤网一"最近 N 期创新高"这个前提条件本身就不成立，背离信号从源头
+    就不会被触发，系统必须稳稳持仓，不被这种更粗暴的砸盘手法骗出场。
+    """
+    engine = StateMachineEngine()
+    asset_id = "SPIKEDOWN"
+    engine._current_stage_cache[asset_id] = Stage.LEADERSHIP
+    engine._peak_score[asset_id] = 0.85
+
+    closes = [100.0, 70.0, 60.0, 62.0]  # 剧烈下砸，全程都不是"创新高"
+    delta2_rs_values = [1.5, 1.2, 1.0, 1.1]  # 相对强度维持正值，大趋势未崩
+    crowding_penalties = [0.9, 0.9, 0.9, 0.9]  # 全程不拥挤，缩量洗盘
+
+    results = []
+    for close, delta2_rs, crowding_penalty in zip(closes, delta2_rs_values, crowding_penalties):
+        result = engine.update_asset_state(
+            asset_id,
+            {
+                "cs_score": 0.85,
+                "close": close,
+                "delta2_rs": delta2_rs,
+                "crowding_penalty": crowding_penalty,
+            },
+            None,
+        )
+        results.append(result)
+
+    # 全程都不应触发任何迁移，稳稳持有在 LEADERSHIP
+    assert results == [Stage.LEADERSHIP] * 4
+    assert engine.last_transition is None

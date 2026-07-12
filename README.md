@@ -151,5 +151,5 @@ python run_meme_stress_test.py --data crypto_market_daily.csv
 HTTP API 服务、参数网格扫描工具、真实历史数据下载工具（主流 + 妖币资产池
 共 26 个交易对）、无损对比回归检查工具、妖币极限压力测试工具均已完成，
 且已用真实数据完成参数校准并回填为出厂默认值，沙盒闭环已打通，单元测试
-34 项全部通过。具体设计、诚实的局限性说明与下一步计划见
+35 项全部通过。具体设计、诚实的局限性说明与下一步计划见
 [`project_manifest.md`](./project_manifest.md) 的相应章节。
