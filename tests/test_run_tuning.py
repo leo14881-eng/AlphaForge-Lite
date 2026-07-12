@@ -1,7 +1,6 @@
 """run_tuning.py 参数网格扫描脚本的单元测试"""
 import numpy as np
 import pandas as pd
-import peewee as pw
 import pytest
 
 import run_tuning
@@ -38,20 +37,14 @@ def memory_db():
     peewee_db.close()
 
 
-def test_parse_weight_pairs_default_and_custom():
-    assert run_tuning._parse_weight_pairs(None) == run_tuning.DEFAULT_WEIGHT_PAIRS
-    assert run_tuning._parse_weight_pairs("0.5,0.5;0.7,0.3") == ((0.5, 0.5), (0.7, 0.3))
+def test_weight_pairs_sum_to_one():
+    for w_a, w_b in run_tuning.WEIGHT_PAIRS:
+        assert w_a + w_b == pytest.approx(1.0)
 
 
-def test_parse_hysteresis_windows_default_and_custom():
-    assert run_tuning._parse_hysteresis_windows(None) == run_tuning.DEFAULT_HYSTERESIS_WINDOWS
-    assert run_tuning._parse_hysteresis_windows("2,5") == (2, 5)
-
-
-def test_weight_pair_not_summing_to_one_warns(capsys):
-    run_tuning._parse_weight_pairs("0.9,0.9")
-    captured = capsys.readouterr()
-    assert "警告" in captured.err
+def test_weight_pairs_and_hysteresis_windows_match_spec():
+    assert run_tuning.WEIGHT_PAIRS == ((0.8, 0.2), (0.6, 0.4), (0.4, 0.6), (0.2, 0.8))
+    assert run_tuning.HYSTERESIS_WINDOWS == (2, 3, 4)
 
 
 def test_run_one_combo_produces_valid_result(tmp_path, memory_db):
@@ -62,13 +55,11 @@ def test_run_one_combo_produces_valid_result(tmp_path, memory_db):
 
     result = run_tuning._run_one_combo(data, str(csv_path), w_a=0.6, w_b=0.4, hysteresis_window=2)
 
-    assert result.status == "SUCCESS"
     assert result.run_id
-    assert result.weight_delta2_rs == 0.6
-    assert result.weight_volume_delta == 0.4
+    assert result.w_a == 0.6
+    assert result.w_b == 0.4
     assert result.hysteresis_window == 2
-    assert result.discovery_trigger_count >= 0
-    assert result.sample_count >= 0
+    assert result.seed_trigger_count >= 0
 
 
 def test_leaderboard_prints_ranking_and_conclusion(tmp_path, memory_db, capsys):
@@ -79,10 +70,10 @@ def test_leaderboard_prints_ranking_and_conclusion(tmp_path, memory_db, capsys):
 
     results = [
         run_tuning._run_one_combo(data, str(csv_path), w_a=0.8, w_b=0.2, hysteresis_window=2),
-        run_tuning._run_one_combo(data, str(csv_path), w_a=0.4, w_b=0.6, hysteresis_window=3),
+        run_tuning._run_one_combo(data, str(csv_path), w_a=0.2, w_b=0.8, hysteresis_window=3),
     ]
     run_tuning._print_leaderboard(results)
 
     captured = capsys.readouterr()
-    assert "最优参数审计天梯榜" in captured.out
+    assert "参数审计天梯榜" in captured.out
     assert "结论" in captured.out
