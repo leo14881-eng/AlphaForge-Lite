@@ -21,14 +21,18 @@
        越高，晋升门槛按比例放大（更难触发，抑制噪声行情下的假信号）；
        波动率越低，门槛相应收窄。
 
-    4. 防洗盘量价背离逃顶（v0.9 新增）：本引擎内部根据 close / delta2_rs /
-       crowding_penalty 三个原始信号，自行计算 price_volume_divergent
-       （量价背离标记），必须依次通过三层过滤网才会判定为真：
-           - 过滤网一（绝对价格与相对强度双审计）：最近 divergence_window
-             个时间步内，close 创出局部新高，但 delta2_rs 必须在同一窗口
-             内从非负值持续、单调断崖式下穿零轴——只有"价格创新高但相对
-             强度大趋势真的崩了"才算数；相对强度没崩，一律判定为"庄家
-             假砸盘洗盘"，不触发，系统保持静默持股。
+    4. 防洗盘量价背离逃顶（v0.9 新增，v0.95-Beta 加固多窗口投票）：本引擎
+       内部根据 close / delta2_rs / crowding_penalty 三个原始信号，自行
+       计算 price_volume_divergent（量价背离标记），必须依次通过三层
+       过滤网才会判定为真：
+           - 过滤网一（绝对价格与相对强度双审计 + 多窗口共振投票）：对
+             divergence_windows（默认 2/3/4 三档）分别独立判定"最近 N 个
+             时间步内 close 创出局部新高，但 delta2_rs 必须在同一窗口内
+             从非负值持续、单调断崖式下穿零轴"，只有多数窗口同时判定为真
+             才算通过——单一固定窗口容易过拟合到某一段历史数据的节奏，
+             多窗口投票要求信号在不同时间尺度上都站得住脚。只有"价格创
+             新高但相对强度大趋势真的崩了"才算数；相对强度没崩，一律
+             判定为"庄家假砸盘洗盘"，不触发，系统保持静默持股。
            - 过滤网三（状态机平滑迟滞）：过滤网一的原始信号需连续
              divergence_confirm_streak（默认 2）个时间步为真，避免单点
              噪声（实现上先做这一步，紧跟在过滤网一之后）。
@@ -114,10 +118,16 @@ class StateMachineEngine:
         crowding_alert_threshold: crowding_penalty 低于该值视为"本期拥挤"。
         crowding_alert_streak: 连续多少个时间步"拥挤"才触发前瞻逃顶
             （同时也是量价背离过滤网二的共振判定窗口）。
-        divergence_window: 量价背离过滤网一的回看窗口（"最近 N 个时间步
-            内创新高 / 相对强度断崖下穿零轴"里的 N）。
-        divergence_confirm_streak: 量价背离过滤网三——通过前两层过滤的
-            原始信号需要连续为真的时间步数，才会被采纳为最终信号。
+        divergence_windows: 量价背离过滤网一的**多窗口共振投票**回看
+            窗口集合（v0.95-Beta 参数加固第一项，消除单一窗口的过拟合
+            风险）。每个窗口各自独立判定"最近 N 个时间步内创新高 /
+            相对强度断崖下穿零轴"，只有多数窗口同时判定为真，过滤网一
+            才算通过。出厂默认 `(2, 3, 4)`——Reviewer 要求至少包含
+            window=2 与 window=4 两档；这里额外补了 window=3，使投票
+            总数为奇数，保证"多数"语义明确（不会出现 1:1 平票无法判定
+            的情况）。
+        divergence_confirm_streak: 量价背离过滤网三——通过多窗口投票的
+            过滤网一信号需要连续为真的时间步数，才会被采纳为最终信号。
     """
 
     seed_enter: float = 0.35
@@ -132,7 +142,7 @@ class StateMachineEngine:
     vol_scale_max: float = 1.5
     crowding_alert_threshold: float = 0.5
     crowding_alert_streak: int = 2
-    divergence_window: int = 3
+    divergence_windows: tuple[int, ...] = (2, 3, 4)
     divergence_confirm_streak: int = 2
 
     _score_history: dict[str, deque] = field(default_factory=dict, repr=False)
@@ -160,7 +170,7 @@ class StateMachineEngine:
             "vol_scale_max": self.vol_scale_max,
             "crowding_alert_threshold": self.crowding_alert_threshold,
             "crowding_alert_streak": self.crowding_alert_streak,
-            "divergence_window": self.divergence_window,
+            "divergence_windows": list(self.divergence_windows),
             "divergence_confirm_streak": self.divergence_confirm_streak,
         }
 
@@ -256,45 +266,48 @@ class StateMachineEngine:
 
     def _compute_price_volume_divergent(self, asset_id: str, close: float, delta2_rs: float) -> bool:
         """
-        三层过滤网的实际计算顺序有一处刻意的工程调整，在此说明原因：
+        三层过滤网的实际计算顺序有两处刻意的工程调整，在此说明原因：
 
-        过滤网三（"连续 divergence_confirm_streak 期为真"）套用在**过滤网一
-        信号本身**的持续性上，而不是套在"过滤网一 AND 过滤网二"的组合结果
-        上；过滤网二（拥挤度共振）在最终判定时直接读取拥挤度自身已有的
-        `_crowding_streak` 连续告警状态做同一时刻的门控。
+        （1）过滤网一采用**多窗口共振投票**（v0.95-Beta 参数加固第一项）：
+        不再用单一的 divergence_window 判定"最近 N 期创新高 + 相对强度
+        断崖下穿零轴"，而是对 divergence_windows（默认 2/3/4 三档）分别
+        独立判定，取多数窗口的投票结果——只有当多数窗口都判定为真，
+        过滤网一才算通过。这是为了消除"单一窗口大小"这个超参数本身带来
+        的过拟合风险：如果只用一个固定窗口，窗口选大选小都可能只是
+        恰好拟合了某一段历史数据的节奏，多窗口投票要求信号在不同时间
+        尺度上都站得住脚，才会被采纳。
 
-        原因：过滤网二复用的 crowding_alert_streak 本身就是"纯拥挤度持续
-        触发"（既有机制）判定 LEADERSHIP -> DISTRIBUTION 的同一个信号。如果
-        再要求"过滤网一 AND 过滤网二"的组合结果本身也必须连续
-        divergence_confirm_streak 期为真，会出现两套机制互相抢跑的问题：
-        拥挤度刚满足连续告警的那一刻，"纯拥挤度持续触发"机制会抢先把资产
-        打到 DISTRIBUTION，量价背离的组合信号永远等不到自己的确认窗口走完，
-        变成事实上无法触发的死代码。调整后，过滤网一的"新高+断崖"信号独立
-        积累自己的持续性，一旦拥挤度也同时进入告警状态，两套机制会在同一
-        个时间步同时满足触发条件——由于量价背离在 `_decide_target_stage`
-        中的判定优先级更高，会先一步抢占，得到更果断的直接 EXIT，而不是
-        被"纯拥挤度"机制抢先降级到 DISTRIBUTION。
+        （2）过滤网三（"连续 divergence_confirm_streak 期为真"）套用在
+        **过滤网一投票结果本身**的持续性上，而不是套在"过滤网一 AND
+        过滤网二"的组合结果上；过滤网二（拥挤度共振）在最终判定时直接
+        读取拥挤度自身已有的 `_crowding_streak` 连续告警状态做同一时刻
+        的门控。原因：过滤网二复用的 crowding_alert_streak 本身就是
+        "纯拥挤度持续触发"（既有机制）判定 LEADERSHIP -> DISTRIBUTION
+        的同一个信号。如果再要求"过滤网一 AND 过滤网二"的组合结果本身
+        也必须连续 divergence_confirm_streak 期为真，会出现两套机制
+        互相抢跑的问题：拥挤度刚满足连续告警的那一刻，"纯拥挤度持续
+        触发"机制会抢先把资产打到 DISTRIBUTION，量价背离的组合信号
+        永远等不到自己的确认窗口走完，变成事实上无法触发的死代码。
+        调整后，过滤网一的多窗口投票信号独立积累自己的持续性，一旦
+        拥挤度也同时进入告警状态，两套机制会在同一个时间步同时满足
+        触发条件——由于量价背离在 `_decide_target_stage` 中的判定
+        优先级更高，会先一步抢占，得到更果断的直接 EXIT，而不是被
+        "纯拥挤度"机制抢先降级到 DISTRIBUTION。
         """
-        close_history = self._close_history.setdefault(asset_id, deque(maxlen=self.divergence_window))
-        delta2_history = self._delta2_rs_history.setdefault(asset_id, deque(maxlen=self.divergence_window))
+        max_window = max(self.divergence_windows)
+        close_history = self._close_history.setdefault(asset_id, deque(maxlen=max_window))
+        delta2_history = self._delta2_rs_history.setdefault(asset_id, deque(maxlen=max_window))
         close_history.append(close)
         delta2_history.append(delta2_rs)
 
-        filter1_raw = False
-        if len(close_history) == self.divergence_window and len(delta2_history) == self.divergence_window:
-            # 过滤网一 · 绝对价格与相对强度双审计：最近 divergence_window
-            # 个时间步内，close 创出局部新高，但 delta2_rs 必须从非负值
-            # 持续单调断崖式下穿零轴——相对强度大趋势没崩，判定为庄家假
-            # 砸盘洗盘，不计入过滤网一信号。
-            price_new_high = close_history[-1] >= max(close_history)
-            delta2_list = list(delta2_history)
-            monotonic_breakdown = all(
-                delta2_list[i] > delta2_list[i + 1] for i in range(len(delta2_list) - 1)
-            )
-            crossed_zero_downward = delta2_list[0] >= 0 and delta2_list[-1] < 0
-            filter1_raw = price_new_high and monotonic_breakdown and crossed_zero_downward
+        votes = [
+            self._filter1_vote_for_window(close_history, delta2_history, window)
+            for window in self.divergence_windows
+        ]
+        majority_needed = len(self.divergence_windows) // 2 + 1
+        filter1_raw = sum(votes) >= majority_needed
 
-        # 过滤网三 · 状态机平滑迟滞：过滤网一信号需连续
+        # 过滤网三 · 状态机平滑迟滞：过滤网一（多窗口投票结果）需连续
         # divergence_confirm_streak 个时间步为真，避免单点噪声。
         filter1_flags = self._divergence_flags.setdefault(
             asset_id, deque(maxlen=self.divergence_confirm_streak)
@@ -307,6 +320,26 @@ class StateMachineEngine:
         filter2_pass = self._crowding_streak(asset_id) >= self.crowding_alert_streak
 
         return filter1_confirmed and filter2_pass
+
+    @staticmethod
+    def _filter1_vote_for_window(close_history: deque, delta2_history: deque, window: int) -> bool:
+        """
+        过滤网一在单个窗口尺度上的独立投票：最近 window 个时间步内，
+        close 创出局部新高，且 delta2_rs 必须从非负值持续单调断崖式
+        下穿零轴——相对强度大趋势没崩，判定为庄家假砸盘洗盘，本窗口
+        投反对票。数据不足 window 长度时直接投反对票（数据不够，不能
+        判定为真）。
+        """
+        if len(close_history) < window or len(delta2_history) < window:
+            return False
+        close_slice = list(close_history)[-window:]
+        delta2_slice = list(delta2_history)[-window:]
+        price_new_high = close_slice[-1] >= max(close_slice)
+        monotonic_breakdown = all(
+            delta2_slice[i] > delta2_slice[i + 1] for i in range(len(delta2_slice) - 1)
+        )
+        crossed_zero_downward = delta2_slice[0] >= 0 and delta2_slice[-1] < 0
+        return price_new_high and monotonic_breakdown and crossed_zero_downward
 
     # ------------------------------------------------------------------
     # 状态判定逻辑

@@ -62,7 +62,8 @@ class CCSDetector:
         crowding_window: 计算资金费率 / 换手率历史均值与标准差的窗口。
         crowding_lambda: 拥挤度指数压制系数，excess_z 每超出 1 个单位，
             crowding_penalty 按 exp(-lambda) 衰减。
-        weight_delta2_rs / weight_volume_delta: A、B 两个可加分量的权重，
+        weight_delta2_rs / weight_volume_delta: A、B 两个可加分量的**默认**
+            权重（当某个 symbol 不在 asset_weight_overrides 里时使用），
             应满足 weight_delta2_rs + weight_volume_delta == 1。出厂默认值
             0.8 / 0.2 并非启发式拍脑袋，而是用 run_tuning.py 在真实历史
             数据（data/raw/crypto_market_daily.csv，3 年 / 12 资产）上做
@@ -70,6 +71,17 @@ class CCSDetector:
             Lead Time 中位数越大——"相对强度斜率加速度"这个先行信号确实
             比"温和放量"更早于市场反应，直接对应最高目标"早于市场发现
             领导者"。详见 project_manifest.md v0.7/v0.8 快照的天梯榜记录。
+        asset_weight_overrides: 可选的 {symbol: (w_a, w_b)} 覆盖表
+            （v0.95-Beta 新增，参数加固第二项）。CORE（主流）与 MEME
+            （妖币/神币）资产在"尽早发现"与"安全逃顶"两个目标上的实测
+            最优权重方向几乎相反（详见 project_manifest.md 诚实声明第
+            2 点），不应该用一组权重通吃全部资产；生产默认路径
+            （backtest.runner.BacktestConfig 的默认 detector）会通过
+            config.asset_profiles.build_asset_weight_overrides() 自动
+            挂载分类权重，此处默认 None 保持向后兼容——run_tuning.py /
+            run_regression_check.py / run_meme_stress_test.py 这类参数
+            寻优工具需要测试"同一组权重在一批资产上的整体表现"，会显式
+            构造不带 overrides 的 CCSDetector，不受这个机制影响。
     """
 
     rs_slope_window: int = 30
@@ -81,6 +93,7 @@ class CCSDetector:
     crowding_lambda: float = 1.5
     weight_delta2_rs: float = 0.8
     weight_volume_delta: float = 0.2
+    asset_weight_overrides: dict[str, tuple[float, float]] | None = None
 
     @property
     def component_names(self) -> list[str]:
@@ -98,6 +111,7 @@ class CCSDetector:
             "crowding_lambda": self.crowding_lambda,
             "weight_delta2_rs": self.weight_delta2_rs,
             "weight_volume_delta": self.weight_volume_delta,
+            "asset_weight_overrides": self.asset_weight_overrides,
         }
 
     def calculate_cs(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -137,6 +151,11 @@ class CCSDetector:
         return result.drop(columns=["_ret", "_bench_index", "_price_index"]).reset_index(drop=True)
 
     def _compute_for_symbol(self, group: pd.DataFrame) -> pd.DataFrame:
+        # .name 是 pandas 在 groupby(...).apply() 内部动态挂在这个具体分组
+        # 对象实例上的属性，不是 DataFrame 的常规元数据——必须在 .copy() 之前
+        # 读出来，一旦 group = group.copy() 重新绑定成新副本，.name 就没了
+        # （曾经因为在 .copy() 之后读取而踩过这个坑，此处特意提前）。
+        symbol = group.name
         group = group.copy()
 
         # ------- 组件 A：delta2_rs（二阶相对强度加速度） -------
@@ -167,10 +186,15 @@ class CCSDetector:
         group[COMPONENT_CROWDING_PENALTY] = np.exp(-self.crowding_lambda * excess)
 
         # ------- 总分：A、B 加权和 × 拥挤度惩罚系数 -------
-        raw_convergence = (
-            self.weight_delta2_rs * group[COMPONENT_DELTA2_RS]
-            + self.weight_volume_delta * group[COMPONENT_VOLUME_DELTA]
-        )
+        # 拒绝用一组权重通吃全部资产：若该 symbol 在 asset_weight_overrides
+        # 里有登记（如 CORE/MEME 分类权重），优先用它；否则退回本实例的
+        # 默认权重。
+        if self.asset_weight_overrides and symbol in self.asset_weight_overrides:
+            w_a, w_b = self.asset_weight_overrides[symbol]
+        else:
+            w_a, w_b = self.weight_delta2_rs, self.weight_volume_delta
+
+        raw_convergence = w_a * group[COMPONENT_DELTA2_RS] + w_b * group[COMPONENT_VOLUME_DELTA]
         group["cs_score"] = raw_convergence * group[COMPONENT_CROWDING_PENALTY]
         return group
 

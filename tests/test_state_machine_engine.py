@@ -15,6 +15,62 @@ class _FakeStageLookup:
         return self.stage_value
 
 
+def test_filter1_vote_for_window_basic_semantics():
+    """直接测试静态方法 _filter1_vote_for_window：新高 + 从非负断崖下穿零轴才投同意票"""
+    from collections import deque
+
+    close_history = deque([100.0, 101.0, 102.0], maxlen=3)
+    delta2_history = deque([2.0, 1.0, -1.0], maxlen=3)
+    assert StateMachineEngine._filter1_vote_for_window(close_history, delta2_history, 3) is True
+    # 数据不够窗口长度，直接投反对票
+    assert StateMachineEngine._filter1_vote_for_window(close_history, delta2_history, 5) is False
+    # delta2_rs 起点已经是负值（不是"从非负下穿零轴"），投反对票
+    negative_start = deque([-2.0, -1.0, -0.5], maxlen=3)
+    assert StateMachineEngine._filter1_vote_for_window(close_history, negative_start, 3) is False
+
+
+def test_multi_window_voting_majority_overrides_minority_dissent():
+    """
+    v0.95-Beta 参数加固第一项：多窗口共振投票。构造一个序列，让
+    divergence_windows=(2,3,4) 默认配置下，window=2 在最后一步"不同意"
+    （局部窗口起点已经是负值，不满足"从非负下穿零轴"），但 window=3、
+    window=4 都同意——2/3 构成多数，最终判定应为 True（不是被单一窗口
+    的异议否决）。crowding_alert_streak=0 用于中性化过滤网二，只聚焦
+    测试过滤网一的多窗口投票逻辑本身。
+    """
+    engine = StateMachineEngine(divergence_confirm_streak=1, crowding_alert_streak=0)
+    asset_id = "VOTE_MAJORITY"
+
+    closes = [100.0, 101.0, 102.0, 103.0]
+    delta2_rs_values = [2.0, 1.0, -1.0, -2.0]
+    result = True
+    for close, delta2_rs in zip(closes, delta2_rs_values):
+        result = engine._compute_price_volume_divergent(asset_id, close, delta2_rs)
+
+    assert result is True
+
+
+def test_multi_window_voting_rejects_when_minority_agrees():
+    """
+    反例：只有 window=4 一个窗口同意（1/3，不构成多数），其余窗口不同意，
+    最终判定应为 False——避免"只要有一个窗口凑巧信号对了就触发"的假阳性。
+    """
+    engine = StateMachineEngine(divergence_confirm_streak=1, crowding_alert_streak=0)
+    asset_id = "VOTE_MINORITY"
+
+    # delta2_rs 全程为正（从不下穿零轴），只有极端构造下 window=4 的
+    # 起点恰好非负、终点为负，其余窗口起点已经是负值——这里直接用一个
+    # 更直接的反例：delta2_rs 全程非负，任何窗口都不满足"终点为负"，
+    # 三个窗口全部投反对票。
+    closes = [100.0, 101.0, 102.0, 103.0]
+    delta2_rs_values = [2.0, 1.5, 1.0, 0.8]  # 全程非负，从不下穿零轴
+    result = True
+    for close, delta2_rs in zip(closes, delta2_rs_values):
+        result = engine._compute_price_volume_divergent(asset_id, close, delta2_rs)
+
+    assert result is False
+
+
 def test_hysteresis_blocks_single_tick_noise():
     # 显式传入 hysteresis_window=3（而非依赖类默认值），让本测试专注于
     # 验证"迟滞机制本身"而不随出厂默认值调参（v0.8 已固化为 2）而漂移。

@@ -21,10 +21,25 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from config.asset_profiles import build_asset_weight_overrides
 from database.models import Asset, BacktestRun, StateTransitionLog
 from database.session import get_db, init_db
 from detectors.cs_score import CCSDetector
 from state_machine.engine import StageLookup, StateMachineEngine
+
+
+def _default_detector() -> CCSDetector:
+    """
+    生产默认路径（main.py / api/app.py 走的 BacktestConfig() 默认构造）
+    自动挂载 CORE/MEME 资产分类权重（v0.95-Beta 参数加固第二项），
+    拒绝用一组权重通吃全部资产。
+
+    run_tuning.py / run_regression_check.py / run_meme_stress_test.py
+    这三个参数寻优/压力测试工具会显式构造自己的 CCSDetector（不传
+    asset_weight_overrides），不受这个默认行为影响——它们的研究目的
+    就是测试"同一组权重在一批资产上的整体表现"。
+    """
+    return CCSDetector(asset_weight_overrides=build_asset_weight_overrides())
 
 
 class PeeweeStageLookup:
@@ -56,8 +71,12 @@ class BacktestConfig:
             重新加载同一份价格序列（用于 Lead Time 审计）。
         symbols: 限定参与回测的资产范围；None 表示使用数据中出现的
             全部 symbol。
-        detector / engine: 可注入自定义参数的探测器与状态机实例，
-            默认使用各自的出厂参数。
+        detector / engine: 可注入自定义参数的探测器与状态机实例。
+            detector 默认通过 `_default_detector()` 自动挂载 CORE/MEME
+            资产分类权重（见 config/asset_profiles.py）；如需统一权重
+            扫描（参数寻优场景），显式传入不带 asset_weight_overrides
+            的 CCSDetector 即可覆盖这个默认行为。engine 默认使用出厂
+            参数。
         atr_window: 用于估算"市场整体波动率相对比例"（market_atr_ratio）
             的滚动窗口。
     """
@@ -66,7 +85,7 @@ class BacktestConfig:
     strategy_version: str = "v1"
     data_source: str = ""
     symbols: list[str] | None = None
-    detector: CCSDetector = field(default_factory=CCSDetector)
+    detector: CCSDetector = field(default_factory=_default_detector)
     engine: StateMachineEngine = field(default_factory=StateMachineEngine)
     atr_window: int = 14
 
