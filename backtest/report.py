@@ -28,6 +28,17 @@ from database.session import init_db
 from state_machine.constants import STAGE_ORDER, LifecycleStage
 
 
+def _df_to_records(df: pd.DataFrame) -> list[dict]:
+    """把复盘看板的 DataFrame 转成 JSON 安全的 list[dict]，供 HTTP API 层直接返回"""
+    if df.empty:
+        return []
+    safe = df.copy()
+    for col in safe.columns:
+        if pd.api.types.is_timedelta64_dtype(safe[col]) or pd.api.types.is_datetime64_any_dtype(safe[col]):
+            safe[col] = safe[col].astype(str)
+    return safe.where(pd.notna(safe), None).to_dict(orient="records")
+
+
 class BacktestReporter:
     """针对单次回测运行（run_id）的复盘报表生成器"""
 
@@ -220,8 +231,34 @@ class BacktestReporter:
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------
-    # 汇总打印
+    # 汇总输出
     # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """把完整复盘报告转成 JSON 安全的字典，供 HTTP API 层直接返回"""
+        lead_time_df = self.lead_time_audit()
+        lead_time_summary: list[dict] = []
+        if not lead_time_df.empty:
+            agg = (
+                lead_time_df.groupby("stage")["lead_time_bars"]
+                .agg(["mean", "median", "count"])
+                .reset_index()
+            )
+            lead_time_summary = agg.to_dict(orient="records")
+
+        return {
+            "run_id": self.run.run_id,
+            "strategy_name": self.run.strategy_name,
+            "strategy_version": self.run.strategy_version,
+            "status": self.run.status,
+            "data_start_ts": self.run.data_start_ts.isoformat(),
+            "data_end_ts": self.run.data_end_ts.isoformat(),
+            "stage_duration": _df_to_records(self.stage_duration_report()),
+            "transition_path_distribution": _df_to_records(self.transition_path_distribution()),
+            "non_consensus_attribution": _df_to_records(self.non_consensus_attribution()),
+            "lead_time_detail": _df_to_records(lead_time_df),
+            "lead_time_summary": lead_time_summary,
+        }
 
     def print_report(self) -> None:
         """一次性打印完整复盘报告，供命令行直接查看"""

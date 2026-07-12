@@ -1,9 +1,9 @@
-# AlphaForge-Lite 项目清单（v0.5 快照 · 闭环版）
+# AlphaForge-Lite 项目清单（v0.6 快照 · 校准版）
 
 > 项目代号：AlphaForge-Lite
 > 定位：加密资产"非共识资本聚集探测器"量化验证沙盒
 > 快照日期：2026-07-13
-> 当前阶段：端到端回测主流程与 Lead Time 审计报表已交付，沙盒闭环打通，单测 18 项全部通过
+> 当前阶段：沙盒闭环 + 一键 CLI + 常驻 API 服务 + 参数网格扫描 + 真实数据接入工具均已交付，单测 29 项全部通过
 > 远程仓库：https://github.com/leo14881-eng/AlphaForge-Lite（`main` 分支）
 
 ---
@@ -15,53 +15,79 @@
 > 高质量机会时保持现金。我们的目的是早于市场发现领导者，而不是等这个币
 > 涨了很多才认为它是领导者。
 
-本轮交付的意义在于**让这个目标第一次变成可被数据验证的闭环**：
-`BacktestReporter.lead_time_audit()` 直接计算"状态机判定进入 SEED /
-DISCOVERY 的时间点"与"该资产随后生命周期内价格最高点"之间相差多少个
-时间步。中位数为正，才是"早于市场发现领导者"这句话真正成立的证据，
-而不是策略设计者的自我宣称——这是本项目区别于"事后诸葛亮式回测"的
-核心校验点。
+本轮交付把"验证是否早于市场发现领导者"从单次回测的人工判断，升级为
+可自动化重复、可参数寻优的流程：`run_tuning.py` 对 CCS 权重与状态机
+迟滞窗口做网格扫描，用每组参数产出的 Lead Time 中位数直接排序，回答
+"哪组参数最安全、最提前发现领导者"，而不是靠感觉调参。
 
 ---
 
 ## 一、项目当前状态
 
 - [x] 项目目录结构、状态机常量、peewee 数据库模型、独立 git 仓库、README
-- [x] `CCSDetector`（`detectors/cs_score.py`）：delta2_rs / volume_delta /
-      crowding_penalty 三组件与 CS 总分
-- [x] `StateMachineEngine`（`state_machine/engine.py`）：迟滞控制、波动率
-      自适应门槛、前瞻逃顶机制
-- [x] **本轮新增**：`backtest/data_loader.py` —— `DataLoader`，加载
-      `data/raw/` 下的 CSV / Parquet 大宽表，做 schema 校验（复用
-      `detectors.cs_score.REQUIRED_COLUMNS`，避免两处定义漂移）、
-      时间戳解析、数值列类型强制、按 `(symbol, timestamp)` 排序去重
-- [x] **本轮新增**：`backtest/runner.py` —— `BacktestRunner` +
-      `BacktestConfig` + `PeeweeStageLookup`：
-      - `PeeweeStageLookup` 是 `state_machine.engine.StageLookup` 协议的
-        peewee 实现，是 `state_machine` 与 `database` 之间的胶水代码
-      - `run()`：创建 `BacktestRun` Master 记录 -> 向量化一次性调用
-        `CCSDetector.calculate_cs()` 算完全表 -> 按时间步顺序推进，
-        触发迁移即在单个 `atomic()` 事务内批量写入 `StateTransitionLog`
-      - 新增 `market_atr_ratio`（市场整体波动率相对比例）计算，真正把
-        `StateMachineEngine` 的波动率自适应能力用起来，而不是让它闲置
-- [x] **本轮新增**：`backtest/report.py` —— `BacktestReporter`：
-      生命周期分布（阶段停留时长 + 迁移路径分布）、非共识归因
-      （DISCOVERY 组件贡献占比）、**核心审判 · Lead Time 审计**
-      （中位数 Lead Time 是否为正，直接打印验证结论）
-- [x] **本轮新增**：`tests/test_backtest_pipeline.py` 端到端集成测试
-      （合成"温和放量+持续上涨+后期拥挤反转"数据，验证全链路可跑通）
-- [x] 单元测试总计 **18 项全部通过**，并已实机运行一次完整回测 + 报表
-      打印做人工核验（详见下方"实机验证记录"）
+- [x] `CCSDetector`（`detectors/cs_score.py`）、`StateMachineEngine`
+      （`state_machine/engine.py`）、`DataLoader`（`backtest/data_loader.py`）、
+      `BacktestRunner` / `BacktestReporter`（`backtest/runner.py` /
+      `backtest/report.py`），端到端沙盒回测闭环
+- [x] **本轮新增**：`main.py` 全量重写为工业级一键 CLI 入口：
+      - `argparse` 定义 `--data`（大宽表文件）、`--init-db`（清空重建库，
+        显式 opt-in 的破坏性操作）、`--db-path`（自定义数据库文件，默认
+        `alphaforge_lite.db`，裸文件名落在既有 `database/` 目录下）
+      - 数据库层 -> 数据接入层 -> 回测执行层 -> 报表渲染层，每层独立
+        `try/except`，失败时打印带 `[XX层]` 标签的清晰错误并以非零状态码
+        退出，不静默崩溃
+      - 不带 `--data` 时只做数据库初始化后优雅退出（这是设计如此，不是
+        bug——本工具是批处理脚本，不是常驻服务）
+- [x] **本轮新增**：`database/session.py::init_db()` 支持传入
+      `db_path` 覆盖默认路径（仅在数据库句柄首次绑定时生效），配合
+      `main.py --db-path` 使用
+- [x] **本轮新增**：`api/app.py` —— 可选的常驻 HTTP API 服务层
+      （FastAPI + uvicorn，用 `run_api.py` 启动）：
+      - `POST /runs`：同步跑一次完整回测，返回 `run_id`
+      - `GET /runs`：列出最近的回测运行
+      - `GET /runs/{run_id}`：查询某次运行的元数据
+      - `GET /runs/{run_id}/report`：获取完整复盘报告（JSON）
+      - `backtest/report.py::BacktestReporter.to_dict()` +
+        模块级 `_df_to_records()` 辅助函数，把各看板 DataFrame 转成
+        JSON 安全结构，供 API 层直接返回
+      - v1 为同步阻塞式薄封装，不引入任务队列（数据规模变大后可选接入
+        Celery/RQ，不影响其它模块）
+- [x] **本轮新增**：`run_tuning.py` —— 参数网格扫描脚本：
+      - 对 `CCSDetector` 的 `weight_delta2_rs` / `weight_volume_delta`
+        配对权重、`StateMachineEngine` 的 `hysteresis_window` 做网格扫描
+      - 每组参数独立跑一次 `BacktestRunner`，只从 `BacktestReporter`
+        抓取结构化审计结果（不打印逐笔迁移日志），最终打印按整体
+        Lead Time 中位数降序排列的"最优参数审计天梯榜"，并给出结论行
+      - 单组合执行失败会被跳过并记录警告，不会中断整个扫描
+- [x] **本轮新增**：`data/download_data.py` —— 真实历史数据下载工具：
+      - 用 `ccxt` 从 Binance 公开现货 K 线接口（无需 API Key）批量拉取
+        12 个主流交易对（BTC/ETH/SOL/BNB/LINK/ADA/XRP/DOGE/AVAX/DOT/
+        LTC/TRX）近 3 年日线数据，支持自定义交易对/时间范围
+      - 内置分页拉取（应对 Binance 单次请求根数上限）与逐交易对异常
+        隔离（单个交易对失败不影响其它交易对）
+      - 用 `log1p(volume)` 做 min-max 归一化，映射到 `[0.5%, 5%]` 区间
+        作为 `turnover_rate` 代理指标（真实流通量数据不易稳定获取，
+        已在代码注释与本文件中明确标注这是代理指标，不等价于真实换手率）
+      - 产出严格对齐 `detectors.cs_score.REQUIRED_COLUMNS`，保存为
+        `data/raw/crypto_market_daily.csv`，可直接被 `DataLoader` /
+        `main.py --data` 使用
+- [x] **本轮新增**：`AlphaForge-Lite/.venv` 独立虚拟环境（此前
+      IntelliJ IDEA 项目未配置 Python SDK，误用了同目录下另一个项目
+      `ShortGPT` 的重量级 venv，已排查并建立专属环境，详见下方"环境
+      排障记录"）
+- [x] 单元测试总计 **29 项全部通过**（新增 API 集成测试、run_tuning
+      单测、download_data 换手率代理指标单测），并用真实 Binance 数据
+      做过一次端到端实机验证
 
-尚未实现（后续可选增强，非本轮必需）：
+尚未实现（后续可选增强，非阻塞项）：
 
-- [ ] `price_volume_divergent`（量价背离标记）目前没有具体计算公式，
-      `StateMachineEngine` 的前瞻逃顶目前只依赖 `crowding_penalty`
-      连续触发这一条通道生效
-- [ ] 命令行入口（`main.py` 目前仍只负责建库，尚未接入
-      "指定数据文件 -> 跑回测 -> 打印报告"的一键式 CLI）
-- [ ] 真实历史数据的接入与参数调优（当前所有阈值均为出厂默认值，
-      未针对真实加密资产数据做校准）
+- [ ] `price_volume_divergent`（量价背离标记）仍未实现具体计算公式，
+      `StateMachineEngine` 前瞻逃顶目前只有拥挤度这一条通道生效
+- [ ] 用 `data/download_data.py` 抓取的完整 3 年真实数据尚未跑过一轮
+      `run_tuning.py` 网格扫描并根据结果调优出厂默认参数（当前默认值
+      仍是启发式估计，未经真实数据校准收敛）
+- [ ] `POST /runs` 是同步阻塞调用，数据量变大后如需异步化需要评估
+      任务队列方案
 
 ---
 
@@ -79,10 +105,11 @@ AlphaForge-Lite/
 ├── database/
 │   ├── __init__.py
 │   ├── models.py               # peewee 表结构：Asset / BacktestRun / StateTransitionLog
-│   └── session.py              # 数据库延迟绑定、建表初始化、事务上下文
+│   └── session.py              # 数据库延迟绑定、init_db(db_path=...)、事务上下文
 ├── data/
 │   ├── raw/                    # 原始 CSV/Parquet 历史大宽表（不纳入版本管理）
-│   └── processed/              # 清洗/加工后的中间数据（不纳入版本管理）
+│   ├── processed/              # 清洗/加工后的中间数据（不纳入版本管理）
+│   └── download_data.py        # 真实历史数据下载工具（ccxt + Binance，本轮新增）
 ├── detectors/
 │   ├── __init__.py
 │   └── cs_score.py             # CCSDetector：delta2_rs / volume_delta / crowding_penalty
@@ -90,109 +117,132 @@ AlphaForge-Lite/
 │   ├── __init__.py
 │   ├── data_loader.py          # DataLoader：大宽表加载 + schema 校验
 │   ├── runner.py               # BacktestRunner / BacktestConfig / PeeweeStageLookup
-│   └── report.py               # BacktestReporter：三块复盘看板 + Lead Time 审计
+│   └── report.py               # BacktestReporter：三块复盘看板 + to_dict()（本轮新增）
+├── api/
+│   ├── __init__.py
+│   └── app.py                   # FastAPI 常驻 HTTP 服务（本轮新增）
 ├── logs/                       # 运行日志目录
 ├── tests/
 │   ├── __init__.py
-│   ├── test_state_machine.py         # 状态机常量与迁移规则单测
-│   ├── test_state_machine_engine.py  # StateMachineEngine 单测
-│   ├── test_models.py                # 数据库模型单测（内存 SQLite）
-│   ├── test_cs_score.py              # CCSDetector 单测
-│   └── test_backtest_pipeline.py     # 端到端集成测试（本轮新增）
-├── main.py                     # 入口脚本，当前仅负责初始化数据库
+│   ├── test_state_machine.py
+│   ├── test_state_machine_engine.py
+│   ├── test_models.py
+│   ├── test_cs_score.py
+│   ├── test_backtest_pipeline.py
+│   ├── test_api.py                   # API 集成测试（本轮新增）
+│   ├── test_run_tuning.py            # 参数扫描脚本单测（本轮新增）
+│   └── test_download_data.py         # 换手率代理指标单测（本轮新增）
+├── main.py                     # 一键 CLI 入口（本轮全量重写）
+├── run_api.py                   # 启动常驻 HTTP API 服务（本轮新增）
+├── run_tuning.py                 # 参数网格扫描脚本（本轮新增）
 ├── requirements.txt
 ├── .gitignore
 ├── README.md
 └── project_manifest.md         # 本文件
 ```
 
-### 分层职责与依赖方向（本轮闭环，依赖方向与 v0.4 保持一致）
+### 分层职责与依赖方向（本轮扩展）
 
 | 模块 | 职责 | 依赖方向 |
 |---|---|---|
 | `config` | 提供路径等基础配置 | 被所有模块依赖 |
-| `state_machine` | 阶段枚举、迁移规则、状态机执行引擎 | 不依赖 `database`（通过 `StageLookup` 协议解耦） |
+| `state_machine` | 阶段枚举、迁移规则、状态机执行引擎 | 不依赖 `database`（`StageLookup` 协议解耦） |
 | `database` | peewee 表结构与连接管理 | 依赖 `state_machine` |
-| `detectors` | 计算 CCS 得分与组件拆解 | 纯 pandas/numpy，不依赖其他业务模块 |
-| `backtest` | 数据加载 + 回测主流程 + 复盘报表，**本轮打通的总装层** | 依赖 `detectors`、`state_machine`、`database`；`runner.py::PeeweeStageLookup` 是 `state_machine` 与 `database` 之间约定的唯一胶水代码 |
+| `detectors` | 计算 CCS 得分与组件拆解 | 纯 pandas/numpy |
+| `backtest` | 数据加载 + 回测主流程 + 复盘报表 | 依赖 `detectors`、`state_machine`、`database` |
+| `api` | 常驻 HTTP 服务，把 `backtest` 的能力暴露成接口 | 依赖 `backtest`；不被其它模块依赖 |
+| `main.py` / `run_tuning.py` / `data/download_data.py` | 三个独立的命令行入口，分别对应"一键批处理"、"参数寻优"、"真实数据采集" | 均只依赖既有模块，互相之间不依赖 |
 
-### DataLoader（`backtest/data_loader.py`）设计要点
+### main.py（一键 CLI）设计要点
 
-- 支持 `.csv` / `.parquet`，必需列复用 `detectors.cs_score.REQUIRED_COLUMNS`
-  （`timestamp/symbol/close/volume/turnover_rate`），`funding_rate` 可选。
-- 时间戳统一解析为 `datetime64`，价格/成交量/换手率强制转数值类型，
-  非法数据直接抛 `ValueError`/类型错误（不做静默兜底）。
-- 按 `(symbol, timestamp)` 排序去重（重复时间戳保留最后一条），返回长表
-  格式 DataFrame，直接对接 `CCSDetector.calculate_cs()`。
+- `--data` 未指定：只做数据库初始化，打印确认信息后 `return`——这是
+  预期行为，`main.py` 定位始终是批处理脚本而非常驻服务，运行完就退出
+  代表"成功"（`exit code 0`），不是异常。
+- `--init-db`：显式 opt-in 的破坏性操作，会删除旧的 `.db`/`-wal`/
+  `-shm`/`-journal` 文件后重新建表；不带这个参数时绝不会触碰已有数据。
+- `--db-path` 默认值 `alphaforge_lite.db`，与 `config.settings.DB_PATH`
+  的库级默认值 `alphaforge.db` 是两个不同的物理文件——`main.py` CLI
+  的默认值遵循本次需求文档给定的值，二者不冲突，只是刻意区分"直接
+  import 模块用的库级默认库"与"CLI 一键跑批用的库"。
+- 数据接入层会先做一次显式的文件存在性检查（配合 `_resolve_data_path`
+  按"裸文件名 -> `data/raw/` 目录"解析），再交给 `DataLoader` 做
+  schema 校验，两层检查合起来才能覆盖"文件不存在"和"文件存在但格式不对"
+  两类错误，且都有 `[数据接入层]` 前缀的清晰提示。
 
-### BacktestRunner（`backtest/runner.py`）设计要点
+### api/app.py（常驻 HTTP 服务）设计要点
 
-- **两段式执行**：先向量化算完 CCS 全表（一次性 pandas 计算），再对
-  排序后的 `(timestamp, symbol)` 做纯 Python 顺序遍历驱动状态机——
-  重计算部分向量化、状态推进部分保持时间步顺序语义，两者不冲突。
-- **market_atr_ratio**：因数据 schema 只有收盘价、没有高低价，用
-  "日收益率绝对值的滚动均值"替代标准 ATR 作为波动率代理，再对全市场
-  取横截面等权均值、除以其自身更长窗口的历史均值，得到相对比例
-  （1.0 = 与近期常态持平），喂给 `StateMachineEngine` 的波动率自适应门槛。
-- **事务策略**：整个时间步循环包在单个 `db.atomic()` 内批量提交，
-  减少磁盘同步次数；`BacktestRun` 的 Master 记录创建与失败状态回写都在
-  事务外单独完成，保证即使循环中途异常回滚，也不会丢失这次运行"失败"
-  的审计记录。
-- **可复现性**：`param_snapshot` 落库 `data_source`（供 `report.py`
-  回溯价格序列）、`symbols`、`detector_params`、`engine_params`、
-  `atr_window`，一次运行的全部配置均可从数据库单独还原。
+- 用 `python run_api.py` 或 `uvicorn api.app:app` 启动，进程常驻监听
+  端口，不会像 `main.py` 那样跑完退出——这是专门为"习惯服务常驻、
+  调接口"工作方式的场景补的入口，`main.py`（批处理）与 `api/`（常驻
+  服务）是两种互补的使用方式，不是谁取代谁。
+- 用 FastAPI 的 `lifespan` 上下文管理器在服务启动时调用 `init_db()`
+  （新版写法，替代已废弃的 `@app.on_event("startup")`）。
+- `POST /runs` 在请求内同步跑完整回测——面向本地小规模沙盒场景，
+  暂不引入任务队列；`BacktestReporter.to_dict()` 把三块看板 DataFrame
+  转成 JSON 安全结构（`Timestamp`/`Timedelta` 转字符串、`NaN` 转
+  `None`），供 `GET /runs/{run_id}/report` 直接返回。
 
-### BacktestReporter（`backtest/report.py`）设计要点
+### run_tuning.py（参数网格扫描）设计要点
 
-- 只依赖 `run_id` 构造（内部通过 `param_snapshot.data_source` 用
-  `DataLoader` 重新加载价格序列），不依赖 `BacktestRunner` 进程内的
-  任何状态，可在独立进程/独立会话中复盘任意历史运行。
-- **生命周期分布**：同一资产序列内用"下一条记录的时间戳"做差得到停留
-  时长；迁移路径分布按 `(from_stage, to_stage)` 计数降序排列。
-- **非共识归因**：读取该次运行落库的 `detector_params` 中的真实权重
-  （而非写死默认值），计算组件 A/B 在 DISCOVERY 判定中的加权贡献占比，
-  保证归因反映"这次运行实际用的参数"而非出厂默认。
-- **Lead Time 审计（核心审判）**：对每个资产取其首次进入 SEED /
-  DISCOVERY 的时间点，搜索窗口为 `[进入时间点, 该资产下一次 EXIT 的时间
-  点]`（若未 EXIT 则到数据末尾），在窗口内找价格最高点，计算两者相差
-  的时间步数（bar）。同时输出均值与**中位数**，并给出"中位数 > 0 即验证
-  通过"的显式结论行，让 Reviewer 不需要自己算，直接看结论。
+- 权重组合按"配对"给出（如 `(0.8, 0.2)`）而非笛卡尔积，避免出现两个
+  权重都很大/都很小这类不构成有效对照的组合；自定义组合若之和不为 1
+  会打印警告但仍按原样计算（不做隐式归一化，保证"所见即所得"）。
+- 每组参数独立调用 `CCSDetector(weight_delta2_rs=..., weight_volume_delta=...)`
+  与 `StateMachineEngine(hysteresis_window=...)` 注入 `BacktestConfig`，
+  互不干扰；数据只加载一次（在循环外），避免重复 I/O。
+- 抓取的核心指标：整体 Lead Time 中位数（主排序键）、SEED/DISCOVERY
+  各自的中位数、DISCOVERY 触发总频次（来自 `logs_df` 全量计数，而非
+  `lead_time_audit()` 的"每资产仅首次"采样，两者刻意区分）。
 
-### 实机验证记录
+### data/download_data.py（真实数据下载）设计要点
 
-本轮除 18 项单元测试外，额外用独立脚本对一份 150 根日线的合成数据
-（PUMP 资产：60 根平静 + 50 根温和放量上涨 + 后段换手率/资金费率骤增
-模拟拥挤反转）跑了一次真实的 `DataLoader -> BacktestRunner ->
-BacktestReporter` 全链路，人工核验打印输出：SEED 阶段被触发 5 次、
-Lead Time 审计正确识别出一次"提前 2 个时间步发现价格高点"的样本
-（`lead_time_bars=2` > 0），验证报表的时间对齐与文案渲染均符合预期。
-（该次验证使用临时数据库文件，未写入本仓库跟踪的数据/数据库文件。）
+- 独立于核心回测链路：`DataLoader`/`BacktestRunner` 等模块不依赖
+  `ccxt`，只依赖本脚本产出的 CSV 文件，卸载 `ccxt` 不影响回测功能。
+- 脚本位于 `data/` 子目录但需要 `import config`/`detectors`，运行时
+  显式把项目根目录插入 `sys.path`，避免"直接跑子目录脚本导致根包
+  导入失败"这个常见坑。
+- `turnover_rate` 是**代理指标**（`log1p(volume)` 归一化映射到
+  `[0.5%, 5%]`），不是真实换手率——已在代码注释、单测、本文件三处
+  一致声明，避免未来被误当作真实数据使用。
+
+### 环境排障记录（本轮会话中发生，记录在案）
+
+用户反馈 IntelliJ IDEA 调试 `main.py` 时报 `torch` 相关的
+`ImportError`/`KeyboardInterrupt`。排查发现 `AlphaForge-Lite` 项目在
+IDE 里被识别成 `JAVA_MODULE`（`.idea/misc.xml` 显示 `project-jdk-type=
+"JavaSDK"`），没有配置专属 Python 解释器，实际调试时误用了同目录下
+另一个项目 `ShortGPT` 的 `.venv`（装有 CUDA 版 torch，DLL 加载慢导致
+表面上像是"卡死"）。已为本项目单独创建 `.venv` 并安装
+`requirements.txt` 全部依赖（含本轮新增的 `fastapi`/`uvicorn`/`httpx`/
+`ccxt`），已被 `.gitignore` 排除，不影响仓库。用户在此过程中还提出了
+"main.py 一启动就退出"的疑问，本质是把批处理脚本预期成了 Java 式常驻
+服务——这正是本轮新增 `api/` HTTP 服务层的直接动机。
 
 ---
 
 ## 三、当前开发进度与下一步行动
 
 **已完成（截至本次会话，2026-07-13）：** 目录脚手架、状态机常量、
-peewee 数据库模型、独立 git 仓库并推送至 GitHub、README、
-`CCSDetector`、`StateMachineEngine`、`DataLoader`、`BacktestRunner`、
-`BacktestReporter`，端到端沙盒回测闭环已打通，单元测试 18 项全部通过，
-并完成一次实机运行核验。
+peewee 数据库模型、独立 git 仓库、README、`CCSDetector`、
+`StateMachineEngine`、`DataLoader`、`BacktestRunner`、`BacktestReporter`
+（端到端沙盒回测闭环）、一键 CLI（`main.py`）、常驻 HTTP API 服务
+（`api/`、`run_api.py`）、参数网格扫描（`run_tuning.py`）、真实历史
+数据下载工具（`data/download_data.py`）、专属 `.venv` 环境。单元测试
+29 项全部通过，并用真实 Binance 数据做过一次端到端实机验证。
 
-**下一次对话可以从这里开始（均为可选增强，非阻塞项）：**
+**下一次对话可以从这里开始：**
 
-1. **补充命令行入口**：在 `main.py` 或新增 `cli.py` 中封装
-   "指定数据文件 -> 跑一次 `BacktestRunner` -> 自动打印 `BacktestReporter`
-   报告"的一键流程，减少每次手工拼接 `DataLoader`/`BacktestConfig` 的样板代码。
+1. **真实数据全量参数校准**：用 `data/download_data.py` 抓取完整
+   3 年、12 个交易对的真实数据，跑一次 `run_tuning.py` 全量网格扫描
+   （而非本轮验证用的短窗口/少量交易对），根据 Lead Time 中位数天梯榜
+   把 `CCSDetector`/`StateMachineEngine` 的出厂默认参数替换成真正校准
+   过的值——这是本项目从"启发式默认值"迈向"数据驱动参数"的关键一步。
 
-2. **实现量价背离信号**（`price_volume_divergent`）：目前
-   `StateMachineEngine` 的前瞻逃顶只有"拥挤度连续触发"一条通道生效，
-   补上具体的量价背离计算公式（如价格新高但 delta2_rs / volume_delta
-   同步走弱）可以让逃顶机制更完整。
+2. **实现量价背离信号**（`price_volume_divergent`）：让
+   `StateMachineEngine` 的前瞻逃顶机制不只依赖拥挤度这一条通道。
 
-3. **接入真实历史数据并做参数校准**：当前所有阈值（`CCSDetector` 权重、
-   `StateMachineEngine` 六个门槛与迟滞/波动率参数）均为出厂默认值，
-   下一步应该用真实加密资产历史数据跑 `BacktestReporter` 的 Lead Time
-   审计，根据中位数结果反过来调优参数，形成"回测 -> 审计 -> 调参"的
-   正向迭代循环——这也是本项目沙盒闭环真正投入使用的第一步。
+3. **`POST /runs` 异步化评估**：如果后续对接的数据量明显变大、单次
+   回测耗时变长，评估是否需要引入任务队列（Celery/RQ），避免长时间
+   阻塞 HTTP 请求。
 
 > 本清单将随每个迭代版本更新，作为 Chief Reviewer 审查项目进展的固定参照物。
