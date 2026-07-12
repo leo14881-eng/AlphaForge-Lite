@@ -56,9 +56,23 @@ python -m pytest tests/ -v
 python main.py
 ```
 
+跑一次完整回测并打印复盘报告：
+
+```python
+from backtest.data_loader import DataLoader
+from backtest.runner import BacktestConfig, BacktestRunner
+from backtest.report import BacktestReporter
+
+data = DataLoader().load("your_wide_table.csv")  # 从 data/raw/ 加载
+config = BacktestConfig(data_source="your_wide_table.csv")
+run = BacktestRunner(data=data, config=config).run()
+BacktestReporter(run_id=run.run_id).print_report()
+```
+
 ## 当前状态
 
-脚手架、数据库模型、CCS（Capital Convergence Score）探测算法、自适应状态机执行引擎
-均已完成并有单元测试覆盖。数据加载层与端到端回测流程（backtest/runner.py、
-backtest/report.py）尚未实现，具体计划见 [`project_manifest.md`](./project_manifest.md)
+脚手架、数据库模型、CCS（Capital Convergence Score）探测算法、自适应状态机执行引擎、
+数据加载层（DataLoader）、端到端回测主流程（BacktestRunner）与复盘审计报表
+（BacktestReporter，含 Lead Time 审计）均已完成，沙盒闭环已打通，单元测试
+18 项全部通过。具体设计与下一步计划见 [`project_manifest.md`](./project_manifest.md)
 的"当前开发进度与下一步行动"章节。
