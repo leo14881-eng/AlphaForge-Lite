@@ -1,9 +1,10 @@
-# AlphaForge-Lite 项目清单（v0.2 快照）
+# AlphaForge-Lite 项目清单（v0.3 快照）
 
 > 项目代号：AlphaForge-Lite
 > 定位：加密资产"非共识资本聚集探测器"量化验证沙盒
 > 快照日期：2026-07-12
-> 当前阶段：脚手架搭建完成，探测器/回测逻辑尚未实现
+> 当前阶段：脚手架搭建完成，已推送至 GitHub，探测器/回测逻辑尚未实现
+> 远程仓库：https://github.com/leo14881-eng/AlphaForge-Lite（`main` 分支）
 
 ---
 
@@ -41,6 +42,12 @@
       （得分的组件拆解 JSON），保证每一次判定都可解释、可复盘
 - [x] 数据库连接管理与建表初始化逻辑完成（`database/session.py`）
 - [x] 基础单元测试覆盖状态机规则与数据库模型的核心行为（`tests/`）
+- [x] 已在 `AlphaForge-Lite` 目录下单独建立独立 git 仓库（不与
+      `D:\SOFT\python` 下的其他兄弟项目共用），并推送至
+      `https://github.com/leo14881-eng/AlphaForge-Lite`（`main` 分支，
+      首个 commit `80139c6`）
+- [x] **本轮新增**：补充 `README.md`（最高目标、技术栈、目录结构、
+      快速开始指引），作为仓库首页说明文档
 
 尚未实现（占位阶段）：
 
@@ -82,6 +89,7 @@ AlphaForge-Lite/
 ├── main.py                     # 入口脚本，当前仅负责初始化数据库
 ├── requirements.txt
 ├── .gitignore
+├── README.md                   # 仓库首页说明（快速开始 / 目录结构 / 最高目标摘要）
 └── project_manifest.md         # 本文件
 ```
 
@@ -124,7 +132,12 @@ Asset (1) ──< StateTransitionLog >── (1) BacktestRun
 
 ---
 
-## 三、下一步行动计划
+## 三、当前开发进度与下一步行动
+
+**已完成（截至本次会话）：** 目录脚手架、状态机常量、peewee 数据库模型 /
+连接管理、单元测试（6 项全部通过）、独立 git 仓库并推送至 GitHub、README.md。
+
+**下一次对话应从这里开始：**
 
 1. **实现 CS 得分计算逻辑**（`detectors/cs_score.py`，待创建）
    - 输入：某资产在某时间戳的原始指标（量价、持仓分布、资金流）
