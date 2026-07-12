@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.pytest_cache/
+
+# 本地 SQLite 数据库文件，不纳入版本管理
+database/*.db
+database/*.db-journal
+
+# 本地历史行情大宽表，体积较大，不纳入版本管理
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+logs/*
+!logs/.gitkeep
