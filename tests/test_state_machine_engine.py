@@ -62,15 +62,23 @@ def test_forward_looking_exit_on_persistent_crowding():
     assert "拥挤" in engine.last_transition.reason
 
 
-def test_price_volume_divergence_forces_exit_from_distribution():
+def test_price_volume_divergence_override_forces_exit_from_leadership():
+    """
+    v0.9：量价背离强制退出的适用范围收窄为"持仓阶段"（DISCOVERY /
+    LEADERSHIP），不再包含 DISTRIBUTION——DISTRIBUTION 阶段的退出仍由
+    "纯拥挤度持续触发"或常规阈值判定负责。这里用显式覆盖值
+    （price_volume_divergent=True）验证 LEADERSHIP 场景下的强制退出通道。
+    """
     engine = StateMachineEngine()
     asset_id = "DIVERGE"
-    engine._current_stage_cache[asset_id] = Stage.DISTRIBUTION
+    engine._current_stage_cache[asset_id] = Stage.LEADERSHIP
+    engine._peak_score[asset_id] = 0.85
 
     result = engine.update_asset_state(
-        asset_id, {"cs_score": 0.5, "price_volume_divergent": True}, None
+        asset_id, {"cs_score": 0.85, "price_volume_divergent": True}, None
     )
     assert result == Stage.EXIT
+    assert engine.last_transition.from_stage == Stage.LEADERSHIP
 
 
 def test_full_lifecycle_progression_is_always_legal():

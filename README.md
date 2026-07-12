@@ -11,6 +11,11 @@
 
 项目的全部设计决策都围绕这一目标展开，详见 [`project_manifest.md`](./project_manifest.md)。
 
+**诚实声明**：目前的 Lead Time / 回归检查等"效果良好"的结论，都只基于本地
+一份静态历史数据的单次回测，没有做样本外（out-of-sample）验证、没有建模
+真实交易成本，也没有和简单基线策略比较过——这是一个设计自洽的研究沙盒，
+不是可以直接实盘的投资建议。详见 `project_manifest.md` 的诚实声明章节。
+
 ## 项目定位
 
 - 基于本地静态 CSV / Parquet 历史时序大宽表做沙盒回测，不接入实时数据源
@@ -20,6 +25,8 @@
   （资金集中度综合评分）与其组件拆解，保证可解释、可复盘
 - Lead Time 审计直接回答"我们是否真正做到了早于市场发现领导者"，用数据
   而非自我宣称验证策略有效性
+- 防洗盘量价背离三层过滤网：在崩溃/剧烈洗盘前夜，区分"庄家真出逃"与
+  "高位缩量假摔洗盘"，只在真出逃时前瞻性强制清仓
 
 ## 技术栈
 
@@ -35,7 +42,7 @@
 ```
 AlphaForge-Lite/
 ├── config/          # 全局路径配置
-├── state_machine/   # 生命周期阶段枚举、迁移规则、自适应状态机执行引擎（看门狗）
+├── state_machine/   # 生命周期阶段枚举、迁移规则、自适应状态机执行引擎（看门狗，含防洗盘量价背离三层过滤网）
 ├── database/        # peewee 表结构与连接管理
 ├── data/            # 原始/加工后的历史行情大宽表（不纳入版本管理）+ download_data.py 数据下载工具
 ├── detectors/       # CCS（Capital Convergence Score）探测算法
@@ -43,10 +50,11 @@ AlphaForge-Lite/
 ├── api/             # 可选的常驻 HTTP API 服务层（FastAPI）
 ├── logs/            # 运行日志
 ├── tests/           # 单元测试
-├── main.py          # 一键 CLI 入口（数据库初始化 -> 数据接入 -> 回测 -> 复盘报表）
-├── run_api.py        # 启动常驻 HTTP API 服务
-├── run_tuning.py      # 参数网格扫描，寻找 Lead Time 中位数最大化的参数组合
-└── run_regression_check.py  # 无损对比回归检查：验证参数回填没有引入逻辑回归
+├── main.py                  # 一键 CLI 入口（数据库初始化 -> 数据接入 -> 回测 -> 复盘报表）
+├── run_api.py                # 启动常驻 HTTP API 服务
+├── run_tuning.py              # 参数网格扫描，寻找 Lead Time 中位数最大化的参数组合
+├── run_regression_check.py     # 无损对比回归检查：验证参数回填没有引入逻辑回归
+└── run_meme_stress_test.py      # 妖币/神币极限压力测试：15 资产池反生存者偏差审计
 ```
 
 完整的分层职责说明、数据库表设计与开发进度，见 [`project_manifest.md`](./project_manifest.md)。
@@ -68,6 +76,7 @@ python main.py
 
 ```bash
 # （可选）抓取真实历史数据，需要先 pip install ccxt
+# 默认拉取主流资产池 + 妖币/神币资产池共 26 个交易对
 python data/download_data.py
 
 # 跑一次完整回测并自动打印复盘报告
@@ -109,9 +118,10 @@ BacktestReporter(run_id=run.run_id).print_report()
 python run_tuning.py --data crypto_market_daily.csv
 ```
 
-用真实 3 年 / 12 资产数据跑出的实测最优参数（`w_a=0.8, w_b=0.2,
-hysteresis_window=2`）已固化为 `CCSDetector` / `StateMachineEngine`
-的出厂默认值。
+具体天梯榜数字会随数据集时间范围变化而变化（详见 `project_manifest.md`
+中关于"参数在不同数据窗口下不稳定"的诚实说明），当前出厂默认值
+`w_a=0.8, w_b=0.2, hysteresis_window=2` 是某一轮真实数据校准的结果，
+不代表在所有市场周期下都是全局最优。
 
 ### 回归检查：验证参数回填没有引入逻辑回归
 
@@ -120,13 +130,26 @@ python run_regression_check.py --data crypto_market_daily.csv
 ```
 
 并排对比"旧启发式默认（0.5/0.5/3）"与"新固化默认（不传参数，直接读
-源码默认值）"的 Lead Time 中位数，真实数据上验证提升 3.0 -> 6.0 天。
+源码默认值）"的 Lead Time 中位数与触发频次。
+
+### 妖币/神币极限压力测试：反生存者偏差审计
+
+```bash
+python run_meme_stress_test.py --data crypto_market_daily.csv
+```
+
+对 15 个"史诗级"高爆发/剧烈洗盘/归零资产（含真实中文 symbol"币安人生"）
+做 6×3=18 组极限参数网格扫描，横截面统计 Lead Time 与"主升浪核心段覆盖
+完整度"，核心审判：哪组参数最能在崩溃前夜以最快前瞻天数强制清仓、
+挽救利润。运行时会如实打印每个资产的真实数据覆盖区间（这批资产大多
+2023-2024 年才上市，无法覆盖 2017-2019 年的早期周期）。
 
 ## 当前状态
 
-脚手架、数据库模型、CCS 探测算法、自适应状态机执行引擎、数据加载层、端到端回测
-主流程、复盘审计报表（含 Lead Time 审计）、一键 CLI、常驻 HTTP API 服务、参数网格
-扫描工具、真实历史数据下载工具、无损对比回归检查工具均已完成，且已用真实数据完成
-一轮参数校准并回填为出厂默认值，沙盒闭环已打通，单元测试 32 项全部通过。
-具体设计与下一步计划见 [`project_manifest.md`](./project_manifest.md) 的
-"当前开发进度与下一步行动"章节。
+脚手架、数据库模型、CCS 探测算法、自适应状态机执行引擎（含防洗盘量价背离
+三层过滤网）、数据加载层、端到端回测主流程、复盘审计报表、一键 CLI、常驻
+HTTP API 服务、参数网格扫描工具、真实历史数据下载工具（主流 + 妖币资产池
+共 26 个交易对）、无损对比回归检查工具、妖币极限压力测试工具均已完成，
+且已用真实数据完成参数校准并回填为出厂默认值，沙盒闭环已打通，单元测试
+34 项全部通过。具体设计、诚实的局限性说明与下一步计划见
+[`project_manifest.md`](./project_manifest.md) 的相应章节。

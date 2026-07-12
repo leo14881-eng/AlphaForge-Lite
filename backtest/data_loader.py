@@ -54,7 +54,10 @@ class DataLoader:
                 f"不支持的文件格式 '{path.suffix}'（{path.name}），仅支持 .csv / .parquet"
             )
 
-        df = pd.read_csv(path) if file_format == "csv" else pd.read_parquet(path)
+        # 显式指定 utf-8-sig：资产池里存在"币安人生"这类原生中文 symbol，
+        # 不显式声明编码在 Windows 平台上容易因默认代码页（如 GBK/CP1252）
+        # 猜错而导致中文 symbol 被静默损坏或匹配失败，必须显式对齐。
+        df = pd.read_csv(path, encoding="utf-8-sig") if file_format == "csv" else pd.read_parquet(path)
 
         missing = set(REQUIRED_COLUMNS) - set(df.columns)
         if missing:

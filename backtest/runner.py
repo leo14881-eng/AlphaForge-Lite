@@ -147,6 +147,11 @@ class BacktestRunner:
                     "cs_score": row.cs_score,
                     "crowding_penalty": row.crowding_penalty,
                     "market_atr_ratio": row.market_atr_ratio,
+                    # close / delta2_rs 供 StateMachineEngine 内部计算
+                    # 量价背离三层过滤（v0.9 新增），不再由调用方直接
+                    # 传入 price_volume_divergent 布尔值。
+                    "close": row.close,
+                    "delta2_rs": row.delta2_rs,
                 }
                 self.config.engine.update_asset_state(row.symbol, metrics, stage_lookup)
                 transition = self.config.engine.last_transition

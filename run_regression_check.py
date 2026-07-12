@@ -41,6 +41,25 @@ LEGACY_WEIGHT_DELTA2_RS = 0.5
 LEGACY_WEIGHT_VOLUME_DELTA = 0.5
 LEGACY_HYSTERESIS_WINDOW = 3
 
+# v0.9 起 data/raw/crypto_market_daily.csv 已扩展为主流资产池 + 妖币池
+# 共 26 个资产（见 data/download_data.py）。v0.8 快照记录的回归检查结果
+# （3.0 天 -> 6.0 天）是基于原始 12 个主流资产跑出来的，这里显式限定
+# symbols，保证同样的命令行调用能复现同样的数字。
+MAINSTREAM_SYMBOLS: tuple[str, ...] = (
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "LINKUSDT",
+    "ADAUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "AVAXUSDT",
+    "DOTUSDT",
+    "LTCUSDT",
+    "TRXUSDT",
+)
+
 
 @dataclass
 class ExperimentResult:
@@ -67,11 +86,16 @@ def _run_experiment(
     w_a: float | None,
     w_b: float | None,
     hysteresis_window: int | None,
+    symbols: list[str] | None = None,
 ) -> ExperimentResult:
     """
     w_a/w_b/hysteresis_window 为 None 时不传给构造函数，直接使用类的
     出厂默认值——实验组 B 正是靠这个"None 分支"验证代码里真正生效的
     默认值，而不是本脚本自己维护的一份影子副本。
+
+    symbols 默认 None（不过滤）——生产入口 main() 会显式传入
+    MAINSTREAM_SYMBOLS 以保证历史结果可复现；单测用自己的合成数据调用
+    本函数时不应被硬编码的主流资产名单过滤掉。
     """
     detector = CCSDetector() if w_a is None else CCSDetector(weight_delta2_rs=w_a, weight_volume_delta=w_b)
     engine = StateMachineEngine() if hysteresis_window is None else StateMachineEngine(hysteresis_window=hysteresis_window)
@@ -80,6 +104,7 @@ def _run_experiment(
         strategy_name="regression_check",
         strategy_version=label,
         data_source=data_arg,
+        symbols=symbols,
         detector=detector,
         engine=engine,
     )
@@ -222,10 +247,11 @@ def main() -> None:
         LEGACY_WEIGHT_DELTA2_RS,
         LEGACY_WEIGHT_VOLUME_DELTA,
         LEGACY_HYSTERESIS_WINDOW,
+        symbols=list(MAINSTREAM_SYMBOLS),
     )
 
     print("[回归检查层] 实验组 B（新固化默认，CCSDetector()/StateMachineEngine() 不传任何参数）静默回测中……")
-    result_b = _run_experiment(data, args.data, "B: 新固化默认", None, None, None)
+    result_b = _run_experiment(data, args.data, "B: 新固化默认", None, None, None, symbols=list(MAINSTREAM_SYMBOLS))
 
     _print_scoreboard(result_a, result_b)
 

@@ -43,6 +43,26 @@ HYSTERESIS_WINDOWS: tuple[int, ...] = (2, 3, 4)
 
 DEFAULT_DATA_FILE = "crypto_market_daily.csv"
 
+# v0.9 起 data/raw/crypto_market_daily.csv 已扩展为主流资产池 + 妖币池
+# 共 26 个资产（见 data/download_data.py）。本脚本的历史校准结果
+# （v0.7/v0.8 快照记录的天梯榜）都是基于原始 12 个主流资产跑出来的，
+# 这里显式限定 symbols，保证同样的命令行调用能复现同样的数字，不会
+# 因为数据文件里多出的妖币资产而悄悄改变结果。
+MAINSTREAM_SYMBOLS: tuple[str, ...] = (
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "LINKUSDT",
+    "ADAUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "AVAXUSDT",
+    "DOTUSDT",
+    "LTCUSDT",
+    "TRXUSDT",
+)
+
 
 @dataclass
 class TuningResult:
@@ -62,14 +82,26 @@ class TuningResult:
 
 
 def _run_one_combo(
-    data: pd.DataFrame, data_arg: str, w_a: float, w_b: float, hysteresis_window: int
+    data: pd.DataFrame,
+    data_arg: str,
+    w_a: float,
+    w_b: float,
+    hysteresis_window: int,
+    symbols: list[str] | None = None,
 ) -> TuningResult:
+    """
+    symbols 默认 None（不过滤，使用 data 里出现的全部资产）——生产入口
+    main() 会显式传入 MAINSTREAM_SYMBOLS 以保证历史结果可复现；单测用
+    自己的合成数据、合成 symbol 名调用本函数时不应该被硬编码的主流资产
+    名单过滤掉，因此这里不写死默认值。
+    """
     detector = CCSDetector(weight_delta2_rs=w_a, weight_volume_delta=w_b)
     engine = StateMachineEngine(hysteresis_window=hysteresis_window)
     config = BacktestConfig(
         strategy_name="param_tuning_sweep",
         strategy_version=f"wa{w_a}_wb{w_b}_h{hysteresis_window}",
         data_source=data_arg,
+        symbols=symbols,
         detector=detector,
         engine=engine,
     )
@@ -191,7 +223,7 @@ def main() -> None:
     for i, ((w_a, w_b), hysteresis_window) in enumerate(combos, start=1):
         print(f"[参数扫描层] ({i}/{len(combos)}) w_a={w_a}, w_b={w_b}, hysteresis_window={hysteresis_window} ...")
         try:
-            result = _run_one_combo(data, args.data, w_a, w_b, hysteresis_window)
+            result = _run_one_combo(data, args.data, w_a, w_b, hysteresis_window, symbols=list(MAINSTREAM_SYMBOLS))
         except Exception as exc:
             print(f"[参数扫描层] 该组合执行失败，跳过: {exc}", file=sys.stderr)
             continue

@@ -13,7 +13,7 @@
        兜底防线，不做静默纠正）。
 
     2. 迟滞控制（Hysteresis）：进入 SEED / DISCOVERY 要求最近连续
-       hysteresis_window（默认 3）个时间步的 CS 得分都达到门槛，避免
+       hysteresis_window（默认 2）个时间步的 CS 得分都达到门槛，避免
        单点噪声导致状态瞬时切换。
 
     3. 波动率自适应：调用方可在 current_metrics 中提供 market_atr_ratio
@@ -21,10 +21,38 @@
        越高，晋升门槛按比例放大（更难触发，抑制噪声行情下的假信号）；
        波动率越低，门槛相应收窄。
 
-    4. 前瞻逃顶：一旦 crowding_penalty 连续触发（拥挤度长期处于高位）
-       或调用方标记了量价背离（price_volume_divergent），无论 CS 得分
-       是否还处于高位，状态机都会抢先把 LEADERSHIP 打入 DISTRIBUTION、
-       或把 DISTRIBUTION 打入 EXIT——目的是在价格真正大跌之前退出。
+    4. 防洗盘量价背离逃顶（v0.9 新增）：本引擎内部根据 close / delta2_rs /
+       crowding_penalty 三个原始信号，自行计算 price_volume_divergent
+       （量价背离标记），必须依次通过三层过滤网才会判定为真：
+           - 过滤网一（绝对价格与相对强度双审计）：最近 divergence_window
+             个时间步内，close 创出局部新高，但 delta2_rs 必须在同一窗口
+             内从非负值持续、单调断崖式下穿零轴——只有"价格创新高但相对
+             强度大趋势真的崩了"才算数；相对强度没崩，一律判定为"庄家
+             假砸盘洗盘"，不触发，系统保持静默持股。
+           - 过滤网三（状态机平滑迟滞）：过滤网一的原始信号需连续
+             divergence_confirm_streak（默认 2）个时间步为真，避免单点
+             噪声（实现上先做这一步，紧跟在过滤网一之后）。
+           - 过滤网二（拥挤度共振）：最终判定时还必须与 crowding_penalty
+             的连续告警状态共振（复用既有的 `_crowding_streak` 机制）——
+             如果换手率并未连续触发高危拥挤报警，说明是"高位缩量洗盘"，
+             直接拒绝触发背离。**工程说明**：把"连续 N 期"的迟滞要求放在
+             过滤网一而非"一二组合结果"上，是刻意的实现选择——crowding
+             共振信号本身已经是多期累积的结果，如果再要求组合结果也连续
+             达标，会与下面第 5 点的"纯拥挤度持续触发"机制互相抢跑（拥挤
+             度刚满足连续告警时，第 5 点机制会抢先把资产降级到
+             DISTRIBUTION，导致量价背离永远等不到自己的确认窗口走完）。
+             调整后两套机制会在同一时间步同时满足条件，量价背离因为判定
+             优先级更高而胜出，得到更果断的直接 EXIT。详见
+             `_compute_price_volume_divergent` 的实现注释。
+       一旦确认，且资产正处于 DISCOVERY 或 LEADERSHIP（持仓）阶段，
+       该信号拥有全局最高优先级，允许打破常规迟滞，直接前瞻性迁移至
+       EXIT——目的是在崩溃前夜以最快速度强制清仓，而不是被动等 CS 得分
+       跌穿阈值（那时往往已经跌了一大截）。
+
+    5. 纯拥挤度持续触发（v0.6 起既有机制，独立于第 4 点）：即便没有
+       触发量价背离，crowding_penalty 连续触发同样会驱动 LEADERSHIP
+       提前打入 DISTRIBUTION、DISTRIBUTION 打入 EXIT，作为量价背离
+       之外的第二道防线。
 
 依赖方向说明：本模块不导入 database.*，与持久层的交互通过 db_session
 参数（只需实现 StageLookup 协议）解耦，保持 state_machine 作为全项目
@@ -79,13 +107,17 @@ class StateMachineEngine:
         downgrade_ratio: SEED 阶段判定信号证伪的比例阈值
             （score < seed_enter * downgrade_ratio 时直接 EXIT）。
         hysteresis_window: 进入 SEED / DISCOVERY 所需的连续达标时间步数。
-            出厂默认值 2 是用 run_tuning.py 在真实历史数据（3 年 / 12
-            资产）上做网格扫描后的实测最优结果，详见
-            project_manifest.md v0.7/v0.8 快照的天梯榜记录。
+            出厂默认值 2 是用 run_tuning.py 在真实历史数据上做网格扫描
+            后的实测最优结果，详见 project_manifest.md v0.7/v0.8 快照。
         vol_scale_min / vol_scale_max: 波动率自适应缩放系数的裁剪区间，
             防止极端波动率把门槛缩放到不合理的范围。
         crowding_alert_threshold: crowding_penalty 低于该值视为"本期拥挤"。
-        crowding_alert_streak: 连续多少个时间步"拥挤"才触发前瞻逃顶。
+        crowding_alert_streak: 连续多少个时间步"拥挤"才触发前瞻逃顶
+            （同时也是量价背离过滤网二的共振判定窗口）。
+        divergence_window: 量价背离过滤网一的回看窗口（"最近 N 个时间步
+            内创新高 / 相对强度断崖下穿零轴"里的 N）。
+        divergence_confirm_streak: 量价背离过滤网三——通过前两层过滤的
+            原始信号需要连续为真的时间步数，才会被采纳为最终信号。
     """
 
     seed_enter: float = 0.35
@@ -100,9 +132,14 @@ class StateMachineEngine:
     vol_scale_max: float = 1.5
     crowding_alert_threshold: float = 0.5
     crowding_alert_streak: int = 2
+    divergence_window: int = 3
+    divergence_confirm_streak: int = 2
 
     _score_history: dict[str, deque] = field(default_factory=dict, repr=False)
     _crowding_flags: dict[str, deque] = field(default_factory=dict, repr=False)
+    _close_history: dict[str, deque] = field(default_factory=dict, repr=False)
+    _delta2_rs_history: dict[str, deque] = field(default_factory=dict, repr=False)
+    _divergence_flags: dict[str, deque] = field(default_factory=dict, repr=False)
     _current_stage_cache: dict[str, Stage | None] = field(default_factory=dict, repr=False)
     _peak_score: dict[str, float] = field(default_factory=dict, repr=False)
     last_transition: StageTransition | None = field(default=None, repr=False)
@@ -123,6 +160,8 @@ class StateMachineEngine:
             "vol_scale_max": self.vol_scale_max,
             "crowding_alert_threshold": self.crowding_alert_threshold,
             "crowding_alert_streak": self.crowding_alert_streak,
+            "divergence_window": self.divergence_window,
+            "divergence_confirm_streak": self.divergence_confirm_streak,
         }
 
     def update_asset_state(self, asset_id: str, current_metrics: dict, db_session: StageLookup | None) -> Stage | None:
@@ -135,7 +174,12 @@ class StateMachineEngine:
             - cs_score: 当期 CCS 总分
             - crowding_penalty: 拥挤度惩罚系数，(0, 1]
             - market_atr_ratio: 市场整体波动率相对比例，默认 1.0（不缩放）
-            - price_volume_divergent: 量价背离标记，默认 False
+            - close: 当期收盘价，用于内部计算量价背离过滤网一
+            - delta2_rs: 当期相对强度二阶加速度，同上
+            - price_volume_divergent: 可选的显式覆盖值。生产链路
+              （BacktestRunner）不应传入此字段，让引擎用 close/delta2_rs/
+              crowding_penalty 自行计算真实的三层过滤结果；仅在单测中
+              需要脱离真实序列直接注入信号时才使用。
 
         本次调用如果触发了迁移，完整上下文会写入 self.last_transition
         （包含 from_stage / to_stage / reason），供调用方读取后落库；
@@ -147,8 +191,10 @@ class StateMachineEngine:
             asset_id, float(current_metrics.get("crowding_penalty", 1.0)) < self.crowding_alert_threshold
         )
 
+        divergent = self._resolve_price_volume_divergent(asset_id, current_metrics)
+
         self._last_reason = ""
-        target_stage = self._decide_target_stage(asset_id, current_stage, current_metrics)
+        target_stage = self._decide_target_stage(asset_id, current_stage, current_metrics, divergent)
 
         if target_stage is None or target_stage == current_stage:
             self.last_transition = None
@@ -172,6 +218,9 @@ class StateMachineEngine:
             self._peak_score.pop(asset_id, None)
             self._score_history.pop(asset_id, None)
             self._crowding_flags.pop(asset_id, None)
+            self._close_history.pop(asset_id, None)
+            self._delta2_rs_history.pop(asset_id, None)
+            self._divergence_flags.pop(asset_id, None)
         else:
             self._current_stage_cache[asset_id] = target_stage
             if target_stage == Stage.LEADERSHIP:
@@ -183,25 +232,115 @@ class StateMachineEngine:
         return target_stage
 
     # ------------------------------------------------------------------
+    # 量价背离三层过滤网
+    # ------------------------------------------------------------------
+
+    def _resolve_price_volume_divergent(self, asset_id: str, metrics: dict) -> bool:
+        """
+        计算/解析本次调用的 price_volume_divergent。
+
+        显式传入的 price_volume_divergent（非 None）会作为直接覆盖值使用，
+        跳过内部三层过滤计算——这是专门为单测场景保留的旁路，生产链路
+        （BacktestRunner）不会传入该字段，因此总是走真实的
+        _compute_price_volume_divergent 三层过滤逻辑。
+        """
+        override = metrics.get("price_volume_divergent")
+        if override is not None:
+            return bool(override)
+
+        close = metrics.get("close")
+        delta2_rs = metrics.get("delta2_rs")
+        if close is None or delta2_rs is None:
+            return False
+        return self._compute_price_volume_divergent(asset_id, float(close), float(delta2_rs))
+
+    def _compute_price_volume_divergent(self, asset_id: str, close: float, delta2_rs: float) -> bool:
+        """
+        三层过滤网的实际计算顺序有一处刻意的工程调整，在此说明原因：
+
+        过滤网三（"连续 divergence_confirm_streak 期为真"）套用在**过滤网一
+        信号本身**的持续性上，而不是套在"过滤网一 AND 过滤网二"的组合结果
+        上；过滤网二（拥挤度共振）在最终判定时直接读取拥挤度自身已有的
+        `_crowding_streak` 连续告警状态做同一时刻的门控。
+
+        原因：过滤网二复用的 crowding_alert_streak 本身就是"纯拥挤度持续
+        触发"（既有机制）判定 LEADERSHIP -> DISTRIBUTION 的同一个信号。如果
+        再要求"过滤网一 AND 过滤网二"的组合结果本身也必须连续
+        divergence_confirm_streak 期为真，会出现两套机制互相抢跑的问题：
+        拥挤度刚满足连续告警的那一刻，"纯拥挤度持续触发"机制会抢先把资产
+        打到 DISTRIBUTION，量价背离的组合信号永远等不到自己的确认窗口走完，
+        变成事实上无法触发的死代码。调整后，过滤网一的"新高+断崖"信号独立
+        积累自己的持续性，一旦拥挤度也同时进入告警状态，两套机制会在同一
+        个时间步同时满足触发条件——由于量价背离在 `_decide_target_stage`
+        中的判定优先级更高，会先一步抢占，得到更果断的直接 EXIT，而不是
+        被"纯拥挤度"机制抢先降级到 DISTRIBUTION。
+        """
+        close_history = self._close_history.setdefault(asset_id, deque(maxlen=self.divergence_window))
+        delta2_history = self._delta2_rs_history.setdefault(asset_id, deque(maxlen=self.divergence_window))
+        close_history.append(close)
+        delta2_history.append(delta2_rs)
+
+        filter1_raw = False
+        if len(close_history) == self.divergence_window and len(delta2_history) == self.divergence_window:
+            # 过滤网一 · 绝对价格与相对强度双审计：最近 divergence_window
+            # 个时间步内，close 创出局部新高，但 delta2_rs 必须从非负值
+            # 持续单调断崖式下穿零轴——相对强度大趋势没崩，判定为庄家假
+            # 砸盘洗盘，不计入过滤网一信号。
+            price_new_high = close_history[-1] >= max(close_history)
+            delta2_list = list(delta2_history)
+            monotonic_breakdown = all(
+                delta2_list[i] > delta2_list[i + 1] for i in range(len(delta2_list) - 1)
+            )
+            crossed_zero_downward = delta2_list[0] >= 0 and delta2_list[-1] < 0
+            filter1_raw = price_new_high and monotonic_breakdown and crossed_zero_downward
+
+        # 过滤网三 · 状态机平滑迟滞：过滤网一信号需连续
+        # divergence_confirm_streak 个时间步为真，避免单点噪声。
+        filter1_flags = self._divergence_flags.setdefault(
+            asset_id, deque(maxlen=self.divergence_confirm_streak)
+        )
+        filter1_flags.append(filter1_raw)
+        filter1_confirmed = len(filter1_flags) == self.divergence_confirm_streak and all(filter1_flags)
+
+        # 过滤网二 · 拥挤度共振：如果换手率没有连续触发高危报警，说明是
+        # "高位缩量洗盘"，直接拒绝触发背离。
+        filter2_pass = self._crowding_streak(asset_id) >= self.crowding_alert_streak
+
+        return filter1_confirmed and filter2_pass
+
+    # ------------------------------------------------------------------
     # 状态判定逻辑
     # ------------------------------------------------------------------
 
-    def _decide_target_stage(self, asset_id: str, current: Stage | None, metrics: dict) -> Stage | None:
+    def _decide_target_stage(
+        self, asset_id: str, current: Stage | None, metrics: dict, divergent: bool
+    ) -> Stage | None:
         cs_score = float(metrics.get("cs_score", 0.0))
         atr_ratio = float(metrics.get("market_atr_ratio", 1.0))
-        divergent = bool(metrics.get("price_volume_divergent", False))
 
-        # ---- 前瞻逃顶：最高优先级，不受得分门槛约束 ----
+        # ---- 最高优先级：量价背离逃顶（三层过滤已在 divergent 中确认） ----
+        # 只在持仓阶段（DISCOVERY / LEADERSHIP）生效，允许打破常规迟滞，
+        # 直接前瞻性强制清仓至 EXIT，而不是像纯拥挤度信号那样先退到
+        # DISTRIBUTION 观察——量价背离是三层过滤后才确认的更强、更紧急
+        # 的信号，值得更果断的动作。
+        if divergent and current in (Stage.DISCOVERY, Stage.LEADERSHIP):
+            self._last_reason = (
+                f"量价背离三层过滤全部确认（连续 {self.divergence_confirm_streak} 期）："
+                "价格创新高但相对强度断崖下穿零轴，且与拥挤度连续告警共振，"
+                "判定庄家真实出逃，前瞻性强制清仓退出"
+            )
+            return Stage.EXIT
+
+        # ---- 次优先级：纯拥挤度持续触发（v0.6 起既有机制） ----
         crowding_persistent = self._crowding_streak(asset_id) >= self.crowding_alert_streak
-        if current in (Stage.LEADERSHIP, Stage.DISTRIBUTION) and (crowding_persistent or divergent):
+        if current in (Stage.LEADERSHIP, Stage.DISTRIBUTION) and crowding_persistent:
             if current == Stage.LEADERSHIP:
                 self._last_reason = (
-                    f"拥挤度惩罚连续 {self.crowding_alert_streak} 期低于阈值 {self.crowding_alert_threshold}"
-                    if crowding_persistent
-                    else "检测到量价背离信号"
-                ) + "，触发前瞻逃顶机制，提前判定优势衰减"
+                    f"拥挤度惩罚连续 {self.crowding_alert_streak} 期低于阈值 "
+                    f"{self.crowding_alert_threshold}，触发前瞻逃顶机制，提前判定优势衰减"
+                )
                 return Stage.DISTRIBUTION
-            self._last_reason = "拥挤/背离信号在 DISTRIBUTION 阶段持续存在，提前判定优势彻底消失"
+            self._last_reason = "拥挤度持续处于高危状态，DISTRIBUTION 阶段提前判定优势彻底消失"
             return Stage.EXIT
 
         scale = min(max(atr_ratio, self.vol_scale_min), self.vol_scale_max)
