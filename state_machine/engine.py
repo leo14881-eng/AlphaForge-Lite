@@ -79,6 +79,9 @@ class StateMachineEngine:
         downgrade_ratio: SEED 阶段判定信号证伪的比例阈值
             （score < seed_enter * downgrade_ratio 时直接 EXIT）。
         hysteresis_window: 进入 SEED / DISCOVERY 所需的连续达标时间步数。
+            出厂默认值 2 是用 run_tuning.py 在真实历史数据（3 年 / 12
+            资产）上做网格扫描后的实测最优结果，详见
+            project_manifest.md v0.7/v0.8 快照的天梯榜记录。
         vol_scale_min / vol_scale_max: 波动率自适应缩放系数的裁剪区间，
             防止极端波动率把门槛缩放到不合理的范围。
         crowding_alert_threshold: crowding_penalty 低于该值视为"本期拥挤"。
@@ -92,7 +95,7 @@ class StateMachineEngine:
     distribution_drawdown: float = 0.15
     exit_floor: float = 0.3
     downgrade_ratio: float = 0.5
-    hysteresis_window: int = 3
+    hysteresis_window: int = 2
     vol_scale_min: float = 0.7
     vol_scale_max: float = 1.5
     crowding_alert_threshold: float = 0.5

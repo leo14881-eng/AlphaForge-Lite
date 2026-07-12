@@ -45,7 +45,8 @@ AlphaForge-Lite/
 ├── tests/           # 单元测试
 ├── main.py          # 一键 CLI 入口（数据库初始化 -> 数据接入 -> 回测 -> 复盘报表）
 ├── run_api.py        # 启动常驻 HTTP API 服务
-└── run_tuning.py      # 参数网格扫描，寻找 Lead Time 中位数最大化的参数组合
+├── run_tuning.py      # 参数网格扫描，寻找 Lead Time 中位数最大化的参数组合
+└── run_regression_check.py  # 无损对比回归检查：验证参数回填没有引入逻辑回归
 ```
 
 完整的分层职责说明、数据库表设计与开发进度，见 [`project_manifest.md`](./project_manifest.md)。
@@ -108,10 +109,24 @@ BacktestReporter(run_id=run.run_id).print_report()
 python run_tuning.py --data crypto_market_daily.csv
 ```
 
+用真实 3 年 / 12 资产数据跑出的实测最优参数（`w_a=0.8, w_b=0.2,
+hysteresis_window=2`）已固化为 `CCSDetector` / `StateMachineEngine`
+的出厂默认值。
+
+### 回归检查：验证参数回填没有引入逻辑回归
+
+```bash
+python run_regression_check.py --data crypto_market_daily.csv
+```
+
+并排对比"旧启发式默认（0.5/0.5/3）"与"新固化默认（不传参数，直接读
+源码默认值）"的 Lead Time 中位数，真实数据上验证提升 3.0 -> 6.0 天。
+
 ## 当前状态
 
 脚手架、数据库模型、CCS 探测算法、自适应状态机执行引擎、数据加载层、端到端回测
 主流程、复盘审计报表（含 Lead Time 审计）、一键 CLI、常驻 HTTP API 服务、参数网格
-扫描工具、真实历史数据下载工具均已完成，沙盒闭环已打通，单元测试 29 项全部通过。
+扫描工具、真实历史数据下载工具、无损对比回归检查工具均已完成，且已用真实数据完成
+一轮参数校准并回填为出厂默认值，沙盒闭环已打通，单元测试 32 项全部通过。
 具体设计与下一步计划见 [`project_manifest.md`](./project_manifest.md) 的
 "当前开发进度与下一步行动"章节。

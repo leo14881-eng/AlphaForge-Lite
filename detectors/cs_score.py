@@ -63,7 +63,13 @@ class CCSDetector:
         crowding_lambda: 拥挤度指数压制系数，excess_z 每超出 1 个单位，
             crowding_penalty 按 exp(-lambda) 衰减。
         weight_delta2_rs / weight_volume_delta: A、B 两个可加分量的权重，
-            应满足 weight_delta2_rs + weight_volume_delta == 1。
+            应满足 weight_delta2_rs + weight_volume_delta == 1。出厂默认值
+            0.8 / 0.2 并非启发式拍脑袋，而是用 run_tuning.py 在真实历史
+            数据（data/raw/crypto_market_daily.csv，3 年 / 12 资产）上做
+            过完整网格扫描后的实测最优结果：weight_delta2_rs 权重越高，
+            Lead Time 中位数越大——"相对强度斜率加速度"这个先行信号确实
+            比"温和放量"更早于市场反应，直接对应最高目标"早于市场发现
+            领导者"。详见 project_manifest.md v0.7/v0.8 快照的天梯榜记录。
     """
 
     rs_slope_window: int = 30
@@ -73,8 +79,8 @@ class CCSDetector:
     volume_sigma: float = 0.6
     crowding_window: int = 60
     crowding_lambda: float = 1.5
-    weight_delta2_rs: float = 0.5
-    weight_volume_delta: float = 0.5
+    weight_delta2_rs: float = 0.8
+    weight_volume_delta: float = 0.2
 
     @property
     def component_names(self) -> list[str]:

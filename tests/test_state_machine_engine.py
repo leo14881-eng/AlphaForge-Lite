@@ -16,10 +16,12 @@ class _FakeStageLookup:
 
 
 def test_hysteresis_blocks_single_tick_noise():
-    engine = StateMachineEngine()
+    # 显式传入 hysteresis_window=3（而非依赖类默认值），让本测试专注于
+    # 验证"迟滞机制本身"而不随出厂默认值调参（v0.8 已固化为 2）而漂移。
+    engine = StateMachineEngine(hysteresis_window=3)
     asset_id = "HYST"
 
-    # 前两次达标不足以触发迁移（默认 hysteresis_window=3）
+    # 前两次达标不足以触发迁移
     assert engine.update_asset_state(asset_id, {"cs_score": 0.5}, None) is None
     assert engine.update_asset_state(asset_id, {"cs_score": 0.5}, None) is None
     # 第三次连续达标才真正进入 SEED

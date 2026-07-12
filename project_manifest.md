@@ -1,9 +1,9 @@
-# AlphaForge-Lite 项目清单（v0.7 快照 · 真实数据校准版）
+# AlphaForge-Lite 项目清单（v0.8 快照 · 默认固化版）
 
 > 项目代号：AlphaForge-Lite
 > 定位：加密资产"非共识资本聚集探测器"量化验证沙盒
 > 快照日期：2026-07-13
-> 当前阶段：已用真实 3 年 / 12 资产数据完成一轮参数网格扫描，产出实测最优参数组合，单测 28 项全部通过
+> 当前阶段：真实数据实测最优参数已回填为出厂默认值，无损对比回归检查通过，单测 32 项全部通过
 > 远程仓库：https://github.com/leo14881-eng/AlphaForge-Lite（`main` 分支）
 
 ---
@@ -15,10 +15,13 @@
 > 高质量机会时保持现金。我们的目的是早于市场发现领导者，而不是等这个币
 > 涨了很多才认为它是领导者。
 
-本轮交付把"验证是否早于市场发现领导者"从单次回测的人工判断，升级为
-可自动化重复、可参数寻优的流程：`run_tuning.py` 对 CCS 权重与状态机
-迟滞窗口做网格扫描，用每组参数产出的 Lead Time 中位数直接排序，回答
-"哪组参数最安全、最提前发现领导者"，而不是靠感觉调参。
+本轮交付完成了"从数据中学到最优参数、并让这份认知固化进系统默认行为"
+的完整闭环：`run_tuning.py` 在真实数据上跑出的最优组合
+（`w_a=0.8, w_b=0.2, hysteresis_window=2`）已回填为 `CCSDetector` /
+`StateMachineEngine` 的构造函数默认值，`run_regression_check.py` 用
+同一份真实数据验证了这次回填让 Lead Time 中位数从 3.0 天翻倍提升到
+6.0 天、且未引入任何逻辑回归——"早于市场发现领导者"第一次成为了这个
+系统不带任何参数、开箱即用就能达到的默认能力。
 
 ---
 
@@ -108,19 +111,43 @@
 - [x] `AlphaForge-Lite/.venv` 独立虚拟环境（此前 IntelliJ IDEA 项目
       未配置 Python SDK，误用了同目录下另一个项目 `ShortGPT` 的重量级
       venv，已排查并建立专属环境，详见下方"环境排障记录"）
-- [x] 单元测试总计 **28 项全部通过**（`run_tuning.py` 因本轮接口调整
-      同步更新了对应单测，净减 1 项属正常的接口变更），并用真实 3 年
-      12 资产 Binance 数据完整跑通过一次端到端回测与一次全量参数网格
-      扫描做实机验证
+- [x] **本轮新增：实测最优参数已回填为出厂默认值**：
+      - `detectors/cs_score.py::CCSDetector`：`weight_delta2_rs`
+        默认值 `0.5 -> 0.8`，`weight_volume_delta` 默认值 `0.5 -> 0.2`
+      - `state_machine/engine.py::StateMachineEngine`：
+        `hysteresis_window` 默认值 `3 -> 2`
+      - 两处默认值的 docstring 均已更新，明确标注"该默认值来自
+        `run_tuning.py` 在真实数据上的网格扫描结果，非拍脑袋估计"
+- [x] **本轮新增**：`run_regression_check.py` —— 无损对比回归脚本：
+      - 实验组 A（旧启发式默认，显式传入 `w_a=0.5, w_b=0.5,
+        hysteresis_window=3`）与实验组 B（新固化默认，`CCSDetector()`
+        / `StateMachineEngine()` 均不传参数，直接读取源码里当前生效的
+        默认值）在同一份真实数据上各跑一次完整回测
+      - 静默执行（不打印逐笔迁移日志），只抓取 Lead Time 中位数与
+        SEED 触发总频次两个核心指标
+      - 并排打印对比看板 + 显式的提升/回归结论行
+
+      **真实数据回归检查结果**（`data/raw/crypto_market_daily.csv`，
+      3 年 / 12 资产）：
+
+      | 实验组 | w_a | w_b | Hysteresis | Lead Time Median | Trigger Count |
+      |---|---|---|---|---|---|
+      | A: 旧启发式默认 | 0.5 | 0.5 | 3 | 3.0 天 | 879 |
+      | B: 新固化默认 | 0.8 | 0.2 | 2 | **6.0 天** | 1248 |
+
+      **结论：回归检查通过。** Lead Time 中位数从 3.0 天提升到 6.0 天
+      （+100%），SEED 触发频次同步从 879 次提升到 1248 次——不仅"更早"，
+      信号也更稳定（不是靠减少样本量换来的偶然提升）。这组对比此前从未
+      被测过（v0.7 的 12 组网格扫描不包含 0.5/0.5/3 这个组合），是本轮
+      新产出的真实证据。
+- [x] 单元测试总计 **32 项全部通过**（新增 `test_regression_check.py`
+      4 项，`test_hysteresis_blocks_single_tick_noise` 因默认值变更
+      同步改为显式传参，避免测试与出厂默认值耦合），并用真实 3 年
+      12 资产 Binance 数据完整跑通过一次端到端回测、一次全量参数网格
+      扫描、一次无损对比回归检查做实机验证
 
 尚未实现（后续可选增强，非阻塞项）：
 
-- [ ] **实测最优参数尚未回填为出厂默认值**：`run_tuning.py` 已经
-      跑出 `w_a=0.8, w_b=0.2, hysteresis_window=2` 是当前数据集上的
-      最优组合，但 `CCSDetector`/`StateMachineEngine` 的构造函数默认值
-      仍是本轮之前设定的启发式估计（`weight_delta2_rs=0.5,
-      weight_volume_delta=0.5`、`hysteresis_window=3`），尚未被这次
-      实测结果替换——这是最直接的下一步
 - [ ] `price_volume_divergent`（量价背离标记）仍未实现具体计算公式，
       `StateMachineEngine` 前瞻逃顶目前只有拥挤度这一条通道生效
 - [ ] `POST /runs` 是同步阻塞调用，数据量变大后如需异步化需要评估
@@ -146,32 +173,34 @@ AlphaForge-Lite/
 ├── data/
 │   ├── raw/                    # 原始 CSV/Parquet 历史大宽表（不纳入版本管理）
 │   ├── processed/              # 清洗/加工后的中间数据（不纳入版本管理）
-│   └── download_data.py        # 真实历史数据下载工具（ccxt + Binance，本轮新增）
+│   └── download_data.py        # 真实历史数据下载工具（ccxt + Binance）
 ├── detectors/
 │   ├── __init__.py
-│   └── cs_score.py             # CCSDetector：delta2_rs / volume_delta / crowding_penalty
+│   └── cs_score.py             # CCSDetector：delta2_rs / volume_delta / crowding_penalty（本轮固化权重默认值 0.8/0.2）
 ├── backtest/
 │   ├── __init__.py
 │   ├── data_loader.py          # DataLoader：大宽表加载 + schema 校验
 │   ├── runner.py               # BacktestRunner / BacktestConfig / PeeweeStageLookup
-│   └── report.py               # BacktestReporter：三块复盘看板 + to_dict()（本轮新增）
+│   └── report.py               # BacktestReporter：三块复盘看板 + to_dict()
 ├── api/
 │   ├── __init__.py
-│   └── app.py                   # FastAPI 常驻 HTTP 服务（本轮新增）
+│   └── app.py                   # FastAPI 常驻 HTTP 服务
 ├── logs/                       # 运行日志目录
 ├── tests/
 │   ├── __init__.py
 │   ├── test_state_machine.py
-│   ├── test_state_machine_engine.py
+│   ├── test_state_machine_engine.py   # 本轮同步修复 hysteresis 默认值耦合问题
 │   ├── test_models.py
 │   ├── test_cs_score.py
 │   ├── test_backtest_pipeline.py
-│   ├── test_api.py                   # API 集成测试（本轮新增）
-│   ├── test_run_tuning.py            # 参数扫描脚本单测（本轮新增）
-│   └── test_download_data.py         # 换手率代理指标单测（本轮新增）
-├── main.py                     # 一键 CLI 入口（本轮全量重写）
-├── run_api.py                   # 启动常驻 HTTP API 服务（本轮新增）
-├── run_tuning.py                 # 参数网格扫描脚本（本轮新增）
+│   ├── test_api.py
+│   ├── test_run_tuning.py
+│   ├── test_download_data.py
+│   └── test_regression_check.py       # 回归检查脚本单测（本轮新增）
+├── main.py                     # 一键 CLI 入口
+├── run_api.py                   # 启动常驻 HTTP API 服务
+├── run_tuning.py                 # 参数网格扫描脚本
+├── run_regression_check.py        # 无损对比回归检查脚本（本轮新增）
 ├── requirements.txt
 ├── .gitignore
 ├── README.md
@@ -237,6 +266,23 @@ AlphaForge-Lite/
   全量计数而非 `lead_time_audit()` 的"每资产仅首次"采样——用于让
   Reviewer 判断"信号是否稳定"，而不只是"有没有巧合命中一次"）。
 
+### run_regression_check.py（无损对比回归检查）设计要点
+
+- **实验组 B 刻意不手写参数副本**：`_run_experiment` 的 `w_a`/`w_b`/
+  `hysteresis_window` 传 `None` 时直接 `CCSDetector()`/
+  `StateMachineEngine()` 空参数实例化，再从实例属性读回实际生效的值
+  写进结果——验证的是"源码里真正跑起来的默认值"，不会因为脚本里手写
+  的一份"应该是多少"副本与源码定义悄悄脱节而产生假阳性通过。
+- 实验组 A 的旧启发式参数（`0.5/0.5/3`）定义为模块级常量
+  `LEGACY_WEIGHT_DELTA2_RS`/`LEGACY_WEIGHT_VOLUME_DELTA`/
+  `LEGACY_HYSTERESIS_WINDOW`，与 `run_tuning.py` 的网格扫描范围不重叠
+  （网格只测了 `0.8/0.2, 0.6/0.4, 0.4/0.6, 0.2/0.8`），是本轮新产出的
+  对照数据点。
+- 结论行按三种情况分支：提升（回归检查通过，打印提升幅度）、持平
+  （回归检查通过但注明未观测到提升）、下降（打印警告，明确不算通过，
+  提示复查 `run_tuning.py` 扫描结果与固化参数是否一致）——不会不分
+  青红皂白地一律打印"通过"。
+
 ### data/download_data.py（真实数据下载）设计要点
 
 - 独立于核心回测链路：`DataLoader`/`BacktestRunner` 等模块不依赖
@@ -271,25 +317,25 @@ peewee 数据库模型、独立 git 仓库、README、`CCSDetector`、
 （端到端沙盒回测闭环）、一键 CLI（`main.py`）、常驻 HTTP API 服务
 （`api/`、`run_api.py`）、真实历史数据下载工具（`data/download_data.py`，
 已实际下载 3 年 12 资产真实数据）、参数网格扫描工具（`run_tuning.py`，
-**已用真实数据完整跑过一轮 12 组合网格扫描，产出实测最优参数
-`w_a=0.8, w_b=0.2, hysteresis_window=2`**）、专属 `.venv` 环境。单元
-测试 28 项全部通过。
+已用真实数据跑出实测最优参数）、**参数回填与无损对比回归检查**
+（`CCSDetector`/`StateMachineEngine` 出厂默认值已固化为
+`w_a=0.8, w_b=0.2, hysteresis_window=2`，`run_regression_check.py`
+用真实数据验证 Lead Time 中位数从 3.0 天提升到 6.0 天、无逻辑回归）、
+专属 `.venv` 环境。单元测试 32 项全部通过。项目至此已完成从
+"沙盒骨架" -> "核心算法" -> "端到端闭环" -> "真实数据接入" -> "参数
+校准与固化" 的完整闭环。
 
-**下一次对话可以从这里开始：**
+**下一次对话可以从这里开始（均为可选增强，非阻塞项）：**
 
-1. **把实测最优参数回填为出厂默认值**：修改
-   `detectors/cs_score.py::CCSDetector` 的 `weight_delta2_rs`/
-   `weight_volume_delta` 默认值为 `0.8`/`0.2`，`state_machine/engine.py
-   ::StateMachineEngine` 的 `hysteresis_window` 默认值为 `2`，让
-   "不带任何自定义参数直接跑" 也能复现本轮校准出的最优效果；建议保留
-   一份对比说明（改前/改后各跑一次 Lead Time 审计），证明回填没有
-   引入回归。
-
-2. **实现量价背离信号**（`price_volume_divergent`）：让
+1. **实现量价背离信号**（`price_volume_divergent`）：让
    `StateMachineEngine` 的前瞻逃顶机制不只依赖拥挤度这一条通道。
 
-3. **`POST /runs` 异步化评估**：如果后续对接的数据量明显变大、单次
+2. **`POST /runs` 异步化评估**：如果后续对接的数据量明显变大、单次
    回测耗时变长，评估是否需要引入任务队列（Celery/RQ），避免长时间
    阻塞 HTTP 请求。
+
+3. **扩大校准样本**：当前的参数校准与回归检查都只基于一份静态的
+   3 年 / 12 资产数据，后续可以考虑滚动窗口外样本测试（如按时间切分
+   训练/验证区间）或扩大资产池，避免参数在单一数据集上过拟合。
 
 > 本清单将随每个迭代版本更新，作为 Chief Reviewer 审查项目进展的固定参照物。
