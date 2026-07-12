@@ -31,11 +31,11 @@
 ```
 AlphaForge-Lite/
 ├── config/          # 全局路径配置
-├── state_machine/   # 生命周期阶段枚举与迁移规则
+├── state_machine/   # 生命周期阶段枚举、迁移规则、自适应状态机执行引擎（看门狗）
 ├── database/        # peewee 表结构与连接管理
 ├── data/            # 原始 / 加工后的历史行情大宽表（不纳入版本管理）
-├── detectors/       # 探测器算法（CS 得分计算逻辑，待实现）
-├── backtest/        # 回测引擎（待实现）
+├── detectors/       # CCS（Capital Convergence Score）探测算法
+├── backtest/        # 回测引擎（数据加载、runner、report，待实现）
 ├── logs/            # 运行日志
 ├── tests/           # 单元测试
 └── main.py          # 入口脚本
@@ -58,6 +58,7 @@ python main.py
 
 ## 当前状态
 
-脚手架已完成：状态机常量、数据库模型（资产表 / 回测运行元数据表 / 状态迁移日志黑匣子表）、
-数据库连接管理、基础单元测试。探测器算法、状态机执行引擎、回测引擎主流程尚未实现，
-具体计划见 [`project_manifest.md`](./project_manifest.md) 的"下一步行动"章节。
+脚手架、数据库模型、CCS（Capital Convergence Score）探测算法、自适应状态机执行引擎
+均已完成并有单元测试覆盖。数据加载层与端到端回测流程（backtest/runner.py、
+backtest/report.py）尚未实现，具体计划见 [`project_manifest.md`](./project_manifest.md)
+的"当前开发进度与下一步行动"章节。
