@@ -12,3 +12,10 @@ requests>=2.31
 # 可选依赖：仅 data/download_data.py 抓取真实历史数据时需要，
 # 核心回测/API 功能不依赖它
 ccxt>=4.0
+
+# 可选依赖：仅 live_monitor/ 子系统（实时行情监控+信号大屏，纸上模拟/
+# 研究用途）需要，核心回测/API 功能不依赖它
+websockets>=12.0
+pymysql>=1.1
+redis>=5.0
+dbutils>=3.0

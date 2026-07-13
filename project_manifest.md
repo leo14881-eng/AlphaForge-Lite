@@ -3,7 +3,7 @@
 > 项目代号：AlphaForge-Lite
 > 定位：加密资产"非共识资本聚集探测器"量化验证沙盒
 > 快照日期：2026-07-13
-> 当前阶段：多窗口共振投票 + CORE/MEME 资产画像分类权重两项防御性加固已完成，新增 Java 执行端信号弹射通道，单测 51 项全部通过
+> 当前阶段：多窗口共振投票 + CORE/MEME 资产画像分类权重两项防御性加固已完成，新增 Java 执行端信号弹射通道 + live_monitor 实时监控子系统（纸上模拟/研究用途），单测 60 项全部通过
 > 远程仓库：https://github.com/leo14881-eng/AlphaForge-Lite（`main` 分支）
 
 **封版声明**：本版本标志着 AlphaForge-Lite 沙盒"功能性闭环"的完成——
@@ -454,5 +454,122 @@ CCS 探测算法、状态机核心、端到端回测闭环、一键 CLI、常驻
 的批量回测入口。是否要现在就实现这个 live 主循环，建议 Reviewer 先
 确认再排期，避免和"沙盒回测 / 参数寻优"这两条已经封版的核心链路搅在
 一起。
+
+---
+
+## 五、live_monitor 实时监控子系统（本轮新增，纸上模拟/研究用途）
+
+**范围声明（务必先读）**：本轮用户提出的原始需求包含"Java 消费端实现
+多 IP 代理池平滑下单，防止交易所 Rate Limit 封锁服务器 IP"——这一项
+本质是绕过交易所反滥用/限流机制的规避手段，大概率违反 Binance 用户
+协议，**已明确拒绝实现**，不在本子系统范围内。用户确认本子系统定位为
+"纸上模拟/研究监控"，不接任何真实交易所下单接口，因此也没有实现
+"Java 单线程顺序消费 + 真实下单 + 熔断死闸"这部分——这部分需要真实
+下单场景才有意义，当前不适用。
+
+- [x] **新增独立子系统 `live_monitor/`**：与 `backtest/` 物理隔离
+      （不同数据库：`live_monitor` 用 MySQL/Redis，`backtest` 用
+      peewee/SQLite；不共享调用路径），对应"项目里有没有定时/实时找
+      领导者的逻辑、有没有把领导者产生/退出写库"这两个问题给出的答案
+      ——此前完全空缺，本轮补上。
+      - `live_monitor/schema.sql`：`strategy_signals`（热表，近 7 天）
+        + `strategy_signals_archive`（冷表，同结构，存历史全量），
+        `signal_uuid` 唯一键防重。
+      - `live_monitor/market_monitor.py`：asyncio 常驻服务。
+        - **高频合约主线**：`websockets` 订阅 Binance U 本位永续合约
+          `trade` 原始逐笔成交流（**不是 aggTrade**——实测排障发现合约
+          `aggTrade`/`markPrice@1s` 在当前网络环境被选择性限流，连续
+          4 轮独立真实连接实验（combined URL、单流 `/ws/`、裸 `/ws` +
+          显式 `SUBSCRIBE` 指令，BTC/ETH 双币种）稳定复现 0 条消息，而
+          合约 `trade`、合约 `bookTicker`、现货 `aggTrade` 全部正常，
+          已改用 `trade`，两种事件共享 `p/q/m/T` 字段，兼容）；
+          `TickWindow`（`deque(maxlen=60)`）滚动维护短(5)/中(20)/长(60)
+          tick 三档窗口，独立投票（价格方向 + 成交量超过自身基线均值
+          1.8 倍才计入共振），多数（>=2/3）同向才算"合约触网"——是
+          `state_machine.engine` 多窗口共振投票思路的实时/tick级简化版，
+          不是同一套代码（CS 得分依赖日线 OHLCV 批量向量化计算，无法
+          直接下沉到逐笔流处理）。
+        - **低频现货防御**：`SpotLargeOrderCache` 独立维护现货
+          `aggTrade` 流（实测正常，维持不变）的大单缓存（名义金额 >= 5
+          万 USDT 才计入，只保留最近 10 秒），合约触网后回溯校验现货
+          是否有同向真实大单，未确认则丢弃（不落库不广播），判定为
+          "合约瞬时洗盘噪声"。
+        - **动态波段 ID**：`signal_uuid = str(uuid.uuid4())`，不用"分钟
+          时间戳拼接"，物理杜绝剧烈波段一分钟内二次变盘导致的漏单/误判重复。
+        - **落库与广播**：`SignalSink` 用 `PooledDB` 连接池执行
+          `INSERT IGNORE` 写 MySQL，`redis.xadd()` 写 Redis Stream
+          （`stream:strategy:signals`），同时维护
+          `leaders:active:{date}` / `leaders:exited:{date}` 两个 Redis
+          Set 供大屏预聚合读取（`SCARD`/`SMEMBERS`，不用 MySQL 现算
+          `COUNT`/`GROUP BY`）。
+      - `live_monitor/archive_cold_data.py`：冷热分离归档脚本，"先复制
+        到冷表、确认成功、再从热表删除"，避免归档失败丢数据；建议
+        cron/任务计划每日执行。
+      - `live_monitor/api.py`（FastAPI）：三个只读接口——
+        `GET /api/v1/market/ticker`（代理 Binance 24hr 公开行情）、
+        `GET /api/v1/signals/daily`（读 Redis 预聚合集合）、
+        `GET /api/v1/signals/history`（`UNION ALL` 热表+冷表分页查询，
+        保证冷热分离后历史全量数据依然可查）。
+      - `live_monitor/static/dashboard.html`：暗黑系单文件大屏，含
+        全市场行情看板（价格变动绿/红闪烁特效）、今日焦点矩阵（活跃
+        领导者绿卡 / 今日退出者红卡）、历史信号流水分页表格，纯
+        `fetch()` 轮询，无需构建工具链。
+- [x] **单元测试** `tests/test_live_monitor.py`（9 项）：覆盖
+      `TickWindow` 多窗口投票（含"长窗口被稀释、不足以单独触发"的边界
+      场景）、`SpotLargeOrderCache` 大单确认与过期淘汰、
+      `MarketMonitor` 的完整非对称过滤链路（合约触网无现货确认时丢弃、
+      双重确认后落库广播、已是活跃领导者时不重复触发）——`SignalSink`
+      用 `Mock` 替换，不需要真实 MySQL/Redis 即可测。
+- [x] **单元测试总计 60 项全部通过**（51 + 本轮新增 9 项）。
+
+**真实环境联调记录（订正此前说法）**：此前认为"沙盒环境无法长时间
+维持到 Binance 的 WebSocket 连接"，实测证明是错的——现货流连续 33 秒
+收到 95 条真实成交、合约 `bookTicker` 连续 25 秒收到 1 万+条，均无
+断线。真实（而非猜测）的限制是上面提到的合约 `aggTrade`/`markPrice`
+选择性限流，已修复。用生产代码 `MarketMonitor.run()` 本身（非探测
+脚本）实测 15 秒：合约(trade) 收到 258 条、现货(aggTrade) 收到 55 条，
+双路数据流确认打通。
+
+**本机基础设施接入状态**：
+  - MySQL：已接入真实本机实例（`localhost:3306`，`root/123456`，库名
+    `alphaforge_lite`，与 Java 侧 `application.yml` 保持一致），实测
+    连通，`alphaforge_lite` 库已存在。
+  - **Redis：已升级完成并全链路真实验证**。本机原版本 `3.0.504`
+    （2016 年 Windows 移植版，不支持 Stream）已卸载停用（`Set-Service
+    Redis -StartupType Disabled`），换装 **Memurai Developer 4.1.2**
+    （`winget install Memurai.MemuraiDeveloper`，Windows 原生服务，
+    `redis_version` 报告 `7.2.5` 兼容），默认即为开机自启（`Automatic`）。
+    首次 `winget install` 因端口 6379 仍被旧服务占用而以 MSI 1603 失败
+    （日志明确写着 `port is in use by another application`），停掉旧
+    服务后重装成功。
+    - 已用真实 `redis-py` 客户端完整跑通消费组可靠性语义：
+      `XADD` → `XGROUP CREATE` → `XREADGROUP`（模拟 Java 消费）→
+      未 `XACK` 时 `XPENDING` 能看到挂起消息 → `XCLAIM`（模拟另一个
+      消费者在原消费者崩溃后抢回消息，即断线重连补偿）→ `XACK` 确认 →
+      `XPENDING` 归零。全部符合用户原规格"Java 消费端必须基于 Redis
+      Stream 消费组可靠消费，完成下单后发送 ACK"的要求。
+  - **MySQL：发现 `alphaforge_lite` 并非空库**，已包含 `users` /
+    `positions` / `order_history` / `user_virtual_account` /
+    `user_api_keys` / `user_strategies` 等真实 Java 应用表，确认是与
+    Java 共用的正式库（不是测试库）。`live_monitor/schema.sql` 用的是
+    `CREATE TABLE IF NOT EXISTS`，已安全执行，只新增
+    `strategy_signals`/`strategy_signals_archive` 两张表，未触碰任何
+    已有表。
+  - **数据流向澄清（此前引发过一次误解，明确记录）**：`strategy_signals`
+    /`strategy_signals_archive` 两张 MySQL 表**只做审计/大屏历史留痕，
+    不是 Java 下单的读取源**；Java 下单必须消费 `stream:strategy:signals`
+    这个 Redis Stream（消费组可靠消费 + ACK），这是双方已确认维持的
+    原规格。写 MySQL 和写 Redis Stream 是两条独立旁路，互不阻塞——已用
+    真实 `SignalSink.persist_and_broadcast()` 生产代码（非 mock）对着
+    真实 MySQL + 真实 Memurai Redis 验证：DISCOVERY/EXIT 两条信号均
+    正确落库、正确广播到 Stream、`leaders:active:{date}`/
+    `leaders:exited:{date}` 两个 Redis Set 正确增删（先 DISCOVERY 后
+    EXIT，活跃集合正确清空、退出集合正确出现该资产）。测试数据已清理，
+    未在共用库里留下垃圾行。
+
+**当前状态**：live_monitor 子系统的基础设施接入（MySQL 建表、Redis 升级
++ Stream 消费组）、合约数据源排障修复（aggTrade -> trade）均已完成真实
+验证，60 项单测全部通过。尚未做的是长时间（数小时级）稳定性挂机观察，
+以及真实 Java 消费端接入后的联调（Java 侧代码不在本仓库范围内）。
 
 > 本清单将随每个迭代版本更新，作为 Chief Reviewer 审查项目进展的固定参照物。

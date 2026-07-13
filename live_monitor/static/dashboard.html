@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>AlphaForge-Lite · 实时信号监控大屏（研究用途）</title>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --panel: #111827;
+    --panel-border: #1f2a3d;
+    --text-primary: #e5eefb;
+    --text-dim: #7c8aa5;
+    --accent: #3ba7ff;
+    --green: #22c98a;
+    --green-glow: rgba(34, 201, 138, 0.18);
+    --red: #ff5470;
+    --red-glow: rgba(255, 84, 112, 0.18);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(circle at top, #0d1424 0%, var(--bg) 60%);
+    color: var(--text-primary);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 24px 32px 60px;
+  }
+  h1 {
+    font-size: 22px;
+    letter-spacing: 1px;
+    margin: 0 0 4px;
+  }
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+  .subtitle .research-tag {
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-left: 8px;
+    font-size: 11px;
+  }
+  section { margin-bottom: 32px; }
+  .section-title {
+    font-size: 14px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 12px;
+  }
+
+  /* ---- 全市场实时行情看板 ---- */
+  #ticker-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .ticker-card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    transition: box-shadow 0.4s ease;
+  }
+  .ticker-card .asset { font-size: 13px; color: var(--text-dim); }
+  .ticker-card .price {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 4px 0;
+    transition: color 0.15s ease;
+  }
+  .ticker-card .change { font-size: 13px; }
+  .flash-up { animation: flashGreen 0.9s ease; }
+  .flash-down { animation: flashRed 0.9s ease; }
+  @keyframes flashGreen {
+    0% { color: var(--green); box-shadow: 0 0 18px var(--green-glow); }
+    100% { color: var(--text-primary); box-shadow: none; }
+  }
+  @keyframes flashRed {
+    0% { color: var(--red); box-shadow: 0 0 18px var(--red-glow); }
+    100% { color: var(--text-primary); box-shadow: none; }
+  }
+  .up { color: var(--green); }
+  .down { color: var(--red); }
+
+  /* ---- 今日焦点矩阵 ---- */
+  .focus-matrix {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .focus-card {
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 18px 20px;
+    min-height: 140px;
+  }
+  .focus-card.leaders {
+    border: 1px solid rgba(34, 201, 138, 0.4);
+    background: linear-gradient(160deg, rgba(34, 201, 138, 0.08), var(--panel) 70%);
+  }
+  .focus-card.exited {
+    border: 1px solid rgba(255, 84, 112, 0.4);
+    background: linear-gradient(160deg, rgba(255, 84, 112, 0.08), var(--panel) 70%);
+  }
+  .focus-card h3 { margin: 0 0 4px; font-size: 15px; }
+  .focus-card .count { font-size: 28px; font-weight: 700; margin-bottom: 10px; }
+  .focus-card.leaders .count { color: var(--green); }
+  .focus-card.exited .count { color: var(--red); }
+  .chip-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .chip.leader { background: var(--green-glow); color: var(--green); border: 1px solid var(--green); }
+  .chip.exited { background: var(--red-glow); color: var(--red); border: 1px solid var(--red); }
+  .empty-hint { color: var(--text-dim); font-size: 13px; }
+
+  /* ---- 历史信号流水表 ---- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 13px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  th { color: var(--text-dim); font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; }
+  td.type-discovery { color: var(--green); font-weight: 600; }
+  td.type-exit { color: var(--red); font-weight: 600; }
+  td.uuid { color: var(--text-dim); font-family: "Consolas", monospace; font-size: 12px; }
+  .pagination { margin-top: 12px; display: flex; gap: 10px; align-items: center; font-size: 13px; }
+  .pagination button {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    color: var(--text-primary);
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<h1>AlphaForge-Lite · 实时信号监控大屏</h1>
+<div class="subtitle">
+  非共识资本聚集探测器 · 实时监控视图
+  <span class="research-tag">纸上模拟 / 研究用途，不含真实下单</span>
+</div>
+
+<section>
+  <div class="section-title">全市场实时行情看板</div>
+  <div id="ticker-grid"></div>
+</section>
+
+<section>
+  <div class="section-title">今日领导者 / 退出者动态焦点</div>
+  <div class="focus-matrix">
+    <div class="focus-card leaders">
+      <h3>当前市场活跃领导者 Active Leaders</h3>
+      <div class="count" id="active-count">0</div>
+      <div class="chip-list" id="active-list"></div>
+    </div>
+    <div class="focus-card exited">
+      <h3>今日已退出者 Exited Today</h3>
+      <div class="count" id="exited-count">0</div>
+      <div class="chip-list" id="exited-list"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-title">全量信号历史流水留痕表</div>
+  <table>
+    <thead>
+      <tr>
+        <th>信号ID</th>
+        <th>标的资产</th>
+        <th>动作类型</th>
+        <th>波段防重键 Signal UUID</th>
+        <th>触发时间</th>
+      </tr>
+    </thead>
+    <tbody id="history-body"></tbody>
+  </table>
+  <div class="pagination">
+    <button id="prev-page">上一页</button>
+    <span id="page-info">第 1 页</span>
+    <button id="next-page">下一页</button>
+  </div>
+</section>
+
+<script>
+const API_BASE = "";           // 与 API 同源部署时留空；跨域部署时改成 "http://host:8090"
+const REFRESH_MS = 5000;
+const PAGE_SIZE = 20;
+
+let lastPrices = {};
+let historyPage = 1;
+let historyTotal = 0;
+
+async function fetchJson(path) {
+  const resp = await fetch(API_BASE + path);
+  if (!resp.ok) throw new Error(`请求失败: ${path} status=${resp.status}`);
+  return resp.json();
+}
+
+function renderTicker(items) {
+  const grid = document.getElementById("ticker-grid");
+  grid.innerHTML = "";
+  items.forEach((item) => {
+    const prev = lastPrices[item.asset];
+    const card = document.createElement("div");
+    card.className = "ticker-card";
+
+    const changeClass = item.change24hPct >= 0 ? "up" : "down";
+    card.innerHTML = `
+      <div class="asset">${item.asset}</div>
+      <div class="price">${item.price.toLocaleString(undefined, {maximumFractionDigits: 6})}</div>
+      <div class="change ${changeClass}">${item.change24hPct >= 0 ? "+" : ""}${item.change24hPct.toFixed(2)}%</div>
+    `;
+
+    if (prev !== undefined && prev !== item.price) {
+      const flashClass = item.price > prev ? "flash-up" : "flash-down";
+      const priceEl = card.querySelector(".price");
+      priceEl.classList.add(flashClass);
+      setTimeout(() => priceEl.classList.remove(flashClass), 900);
+    }
+    lastPrices[item.asset] = item.price;
+    grid.appendChild(card);
+  });
+}
+
+function renderDailyFocus(data) {
+  document.getElementById("active-count").textContent = data.activeLeaderCount;
+  document.getElementById("exited-count").textContent = data.exitedTodayCount;
+
+  const activeList = document.getElementById("active-list");
+  activeList.innerHTML = data.activeLeaders.length
+    ? data.activeLeaders.map((a) => `<span class="chip leader">${a}</span>`).join("")
+    : `<span class="empty-hint">今日暂无新领导者</span>`;
+
+  const exitedList = document.getElementById("exited-list");
+  exitedList.innerHTML = data.exitedToday.length
+    ? data.exitedToday.map((a) => `<span class="chip exited">${a}</span>`).join("")
+    : `<span class="empty-hint">今日暂无退出记录</span>`;
+}
+
+function renderHistory(data) {
+  historyTotal = data.total;
+  const body = document.getElementById("history-body");
+  body.innerHTML = data.items
+    .map(
+      (row) => `
+      <tr>
+        <td>${row.id}</td>
+        <td>${row.asset}</td>
+        <td class="${row.signal_type === "DISCOVERY" ? "type-discovery" : "type-exit"}">${row.signal_type}</td>
+        <td class="uuid">${row.signal_uuid}</td>
+        <td>${row.created_time.replace("T", " ")}</td>
+      </tr>`
+    )
+    .join("");
+
+  const totalPages = Math.max(1, Math.ceil(historyTotal / PAGE_SIZE));
+  document.getElementById("page-info").textContent = `第 ${historyPage} / ${totalPages} 页`;
+  document.getElementById("prev-page").disabled = historyPage <= 1;
+  document.getElementById("next-page").disabled = historyPage >= totalPages;
+}
+
+async function refreshTicker() {
+  try {
+    renderTicker(await fetchJson("/api/v1/market/ticker"));
+  } catch (e) { console.error(e); }
+}
+
+async function refreshDailyFocus() {
+  try {
+    renderDailyFocus(await fetchJson("/api/v1/signals/daily"));
+  } catch (e) { console.error(e); }
+}
+
+async function refreshHistory() {
+  try {
+    renderHistory(await fetchJson(`/api/v1/signals/history?page=${historyPage}&page_size=${PAGE_SIZE}`));
+  } catch (e) { console.error(e); }
+}
+
+document.getElementById("prev-page").addEventListener("click", () => {
+  if (historyPage > 1) { historyPage -= 1; refreshHistory(); }
+});
+document.getElementById("next-page").addEventListener("click", () => {
+  const totalPages = Math.max(1, Math.ceil(historyTotal / PAGE_SIZE));
+  if (historyPage < totalPages) { historyPage += 1; refreshHistory(); }
+});
+
+function refreshAll() {
+  refreshTicker();
+  refreshDailyFocus();
+  refreshHistory();
+}
+
+refreshAll();
+setInterval(refreshTicker, REFRESH_MS);
+setInterval(refreshDailyFocus, REFRESH_MS);
+</script>
+</body>
+</html>
