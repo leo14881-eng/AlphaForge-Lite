@@ -44,17 +44,41 @@ app = FastAPI(
 class RunRequest(BaseModel):
     """POST /runs 的请求体：指定数据源与回测配置"""
 
-    data_source: str  # 文件名（相对 data/raw/ 解析）或绝对/相对路径
+    data_source: str  # 文件名，只能解析到 data/raw/ 目录内，不接受绝对路径或越界的相对路径
     strategy_name: str = "non_consensus_accumulation"
     strategy_version: str = "v1"
     symbols: list[str] | None = None  # 不指定则使用数据中出现的全部资产
 
 
 def _load_data(data_source: str):
+    """
+    把 HTTP 请求里的 data_source 严格约束在 RAW_DATA_DIR 目录内，不能读取
+    任意路径的文件。
+
+    【安全修复记录】此前实现是"只要 path.exists() 就放行走 load_path()
+    （不受目录限制的任意路径加载）"——只要调用方传入的相对路径恰好在
+    进程工作目录下存在（如 "../../../etc/passwd" 之类的路径穿越写法），
+    校验形同虚设，能绕过目录限制读取任意可解析的表格文件。旧版
+    DataLoader.load_path() 本身是给"受信任的本地脚本/CLI 直接指定任意
+    路径"用的，不应该被 HTTP 端点直接暴露——HTTP 请求方是不受信任的
+    输入来源，跟本地脚本调用是两种不同的信任边界。现在统一解析到
+    RAW_DATA_DIR 内部，用 Path.resolve() + relative_to() 严格校验解析后
+    的绝对路径确实落在目录内（同时防住相对路径的 ".." 穿越和直接传入
+    绝对路径这两种绕过方式），而不是像原来那样看"传入的字符串长什么
+    样"来判断。
+    """
     loader = DataLoader()
-    path = Path(data_source)
+    raw_dir = Path(loader.raw_dir).resolve()
+    candidate = (raw_dir / data_source).resolve()
     try:
-        return loader.load_path(path) if path.is_absolute() or path.exists() else loader.load(data_source)
+        candidate.relative_to(raw_dir)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"data_source 必须是 {raw_dir} 目录内的文件，不允许越界访问其它路径",
+        )
+    try:
+        return loader.load_path(candidate)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

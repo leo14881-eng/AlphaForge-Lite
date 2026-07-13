@@ -100,6 +100,39 @@ def test_volatility_adaptive_threshold_scales_up_and_down():
     assert result == Stage.SEED
 
 
+def test_confirmed_above_uses_latest_threshold_not_historical_thresholds():
+    """
+    全局扫描复查后补充的行为锁定测试（见 _confirmed_above 的实现注释）：
+    迟滞窗口判定用的是"当期"波动率自适应门槛去回看"历史各期原始得分"，
+    不是"历史各期各自当期的门槛"。
+
+    构造：hysteresis_window=2。第一期波动率正常（atr_ratio=1.0，门槛
+    0.35），得分 0.40——如果按"各期各自门槛"判定，这一期本该算达标
+    （0.40>=0.35）。第二期波动率飙升（atr_ratio=3.0，裁剪到
+    vol_scale_max=1.5，门槛 0.35*1.5=0.525），得分同样是 0.40。
+
+    按当前实现（"今天的门槛回查全部历史原始得分"）：两期原始得分
+    [0.40, 0.40] 都要跟第二期算出来的门槛 0.525 比较，两期都不达标，
+    不应该确认进入 SEED——即使第一期本来"按自己的标准"是达标的。这个
+    测试把这个行为显式锁定下来，避免以后有人不知情地把它当 bug 改掉，
+    或者在不知情的情况下改动这个语义。
+    """
+    engine = StateMachineEngine(hysteresis_window=2)
+    asset_id = "THRESHOLD_SEMANTICS"
+
+    result_period1 = engine.update_asset_state(
+        asset_id, {"cs_score": 0.40, "market_atr_ratio": 1.0}, None
+    )
+    assert result_period1 is None  # 数据不足 2 期，还不到判定的时候
+
+    result_period2 = engine.update_asset_state(
+        asset_id, {"cs_score": 0.40, "market_atr_ratio": 3.0}, None
+    )
+    # 用第二期（当下）算出来的更高门槛回查两期原始得分，两期都够不着，
+    # 不应确认进入 SEED——这正是"今天的门槛回查历史原始得分"的体现。
+    assert result_period2 is None
+
+
 def test_forward_looking_exit_on_persistent_crowding():
     engine = StateMachineEngine()
     asset_id = "CROWD"

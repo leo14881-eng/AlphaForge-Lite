@@ -107,6 +107,18 @@ class BacktestRunner:
             if self.config.symbols
             else data
         )
+        # 【全局扫描修复】config.symbols 过滤后数据为空时，早期显式拒绝，
+        # 不要让空表一路传到 run() 里——self.data["timestamp"].min() 在空
+        # 表上会返回 NaT，NaT.to_pydatetime() 本身不报错，但 NaT 会被传给
+        # BacktestRun.create(data_start_ts=...) 落库，属于一个几乎无意义
+        # 的错误配置本该在配置校验阶段就被拒绝，而不是让脏数据一路走到
+        # 落库层才可能出问题。
+        if self.data.empty:
+            available = sorted(data["symbol"].unique()) if not data.empty else []
+            raise ValueError(
+                f"按 symbols={self.config.symbols} 过滤后数据集为空，无法执行回测。"
+                f"数据集中实际存在的 symbol 有：{available}"
+            )
         self.symbols: list[str] = sorted(self.data["symbol"].unique())
 
     def run(self) -> BacktestRun:

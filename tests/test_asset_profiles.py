@@ -7,9 +7,41 @@ from config.asset_profiles import (
     ASSET_CLASS_PROFILES,
     ASSET_PROFILE_MAP,
     AssetClass,
+    MAINSTREAM_SYMBOLS,
+    MAINSTREAM_SYMBOLS_CCXT,
     build_asset_weight_overrides,
 )
 from detectors.cs_score import CCSDetector
+
+
+def test_mainstream_symbols_consistent_across_all_consumers():
+    """
+    全局扫描修复的回归测试：MAINSTREAM_SYMBOLS 此前在
+    data/download_data.py / run_tuning.py / run_regression_check.py /
+    config/asset_profiles.py::ASSET_PROFILE_MAP 四处各自独立硬编码，
+    没有测试守护一致性。现在 config.asset_profiles 是唯一权威来源，
+    其余三处改成直接 import——这里验证：
+        1. run_tuning.py / run_regression_check.py 确实 import 的是
+           同一个对象（而不是自己又重新定义了一份"恰好长得一样"的元组）
+        2. data/download_data.py 的 ccxt 格式清单（MAINSTREAM_SYMBOLS_CCXT）
+           跟规范格式清单一一对应、转换正确
+        3. ASSET_PROFILE_MAP 里被标记为 CORE 的 symbol 集合，跟
+           MAINSTREAM_SYMBOLS 完全一致
+    """
+    import run_regression_check
+    import run_tuning
+    from data.download_data import MAINSTREAM_SYMBOLS as download_data_symbols
+
+    assert run_tuning.MAINSTREAM_SYMBOLS is MAINSTREAM_SYMBOLS
+    assert run_regression_check.MAINSTREAM_SYMBOLS is MAINSTREAM_SYMBOLS
+    assert download_data_symbols is MAINSTREAM_SYMBOLS_CCXT
+
+    assert len(MAINSTREAM_SYMBOLS_CCXT) == len(MAINSTREAM_SYMBOLS)
+    for plain, ccxt_format in zip(MAINSTREAM_SYMBOLS, MAINSTREAM_SYMBOLS_CCXT):
+        assert ccxt_format.replace("/", "") == plain
+
+    core_symbols = {s for s, cls in ASSET_PROFILE_MAP.items() if cls == AssetClass.CORE}
+    assert core_symbols == set(MAINSTREAM_SYMBOLS)
 
 
 def test_build_asset_weight_overrides_matches_profile_map():

@@ -29,6 +29,7 @@ import pandas as pd
 from backtest.data_loader import DataLoader
 from backtest.report import BacktestReporter
 from backtest.runner import BacktestConfig, BacktestRunner
+from config.asset_profiles import MAINSTREAM_SYMBOLS
 from config.settings import RAW_DATA_DIR
 from database.session import init_db
 from detectors.cs_score import CCSDetector
@@ -48,20 +49,12 @@ DEFAULT_DATA_FILE = "crypto_market_daily.csv"
 # （v0.7/v0.8 快照记录的天梯榜）都是基于原始 12 个主流资产跑出来的，
 # 这里显式限定 symbols，保证同样的命令行调用能复现同样的数字，不会
 # 因为数据文件里多出的妖币资产而悄悄改变结果。
-MAINSTREAM_SYMBOLS: tuple[str, ...] = (
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "BNBUSDT",
-    "LINKUSDT",
-    "ADAUSDT",
-    "XRPUSDT",
-    "DOGEUSDT",
-    "AVAXUSDT",
-    "DOTUSDT",
-    "LTCUSDT",
-    "TRXUSDT",
-)
+#
+# 【全局扫描修复】MAINSTREAM_SYMBOLS 改为从 config.asset_profiles 导入，
+# 不再本地重复硬编码一份——此前这份清单在四处（本文件/
+# run_regression_check.py/data/download_data.py/
+# config/asset_profiles.py::ASSET_PROFILE_MAP）各自独立维护，没有任何
+# 机制保证一致，config.asset_profiles 现在是唯一权威来源。
 
 
 @dataclass

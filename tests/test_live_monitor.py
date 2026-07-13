@@ -291,6 +291,39 @@ class TestContractOnlyAsymmetricVerification:
 
         mock_sink.persist_and_broadcast.assert_not_called()  # 没有现货确认，情况A分支拒绝
 
+    def test_non_contract_only_exit_uses_relaxed_threshold_not_discovery_threshold(self):
+        """
+        修复复查发现的问题：情况A（有现货）的 EXIT 之前跟 DISCOVERY 共用
+        同一套常规门槛（1.8 倍量能），比情况B改造后的 EXIT 门槛（1.0 倍）
+        更严格，逻辑反了。这里用一个"只够 1.0 倍门槛、够不着 1.8 倍门槛"
+        的中等放量构造验证：已持仓的有现货资产，现在也能用放宽后的门槛
+        触发离场（配合现货确认）。
+        """
+        mock_sink = MagicMock()
+        mock_sink.persist_and_broadcast.return_value = "fake-uuid"
+        monitor = MarketMonitor(symbols=("btcusdt",), sink=mock_sink, contract_only_symbols=frozenset())
+        monitor.active_leaders.add("btcusdt")  # 已经持仓
+        window = monitor.futures_windows["btcusdt"]
+        for i in range(120):
+            window.push(_make_tick(100.0, 1.0, False, ts_ms=BASE_TS_MS + i * 1000))
+        last_baseline_ts = BASE_TS_MS + 119 * 1000
+        # 中等放量下跌（qty=1.3，只比基线均值 1.0 高一点），脚本验证过：
+        # 够满足 1.0 倍放宽门槛，够不着 1.8 倍常规门槛
+        for i in range(19):
+            window.push(_make_tick(100.0 - (i + 1) * 0.3, 1.3, True, ts_ms=last_baseline_ts + (i + 1) * 1000))
+        final_ts = last_baseline_ts + 20 * 1000
+
+        # 现货侧同向大单确认（情况A的 EXIT 仍然走现货确认，只是共振门槛放宽了）
+        large_qty = (SPOT_LARGE_ORDER_NOTIONAL_USDT / 100.0) + 1
+        monitor.spot_cache.push("btcusdt", _make_tick(100.0, large_qty, is_buyer_maker=True))
+
+        asyncio.run(
+            monitor._on_futures_message(_agg_trade_json("BTCUSDT", 94.0, 1.3, True, ts_ms=final_ts))
+        )
+
+        mock_sink.persist_and_broadcast.assert_called_once_with("BTCUSDT", "EXIT")
+        assert "btcusdt" not in monitor.active_leaders
+
 
 class TestSignalSinkLiveModeGuard:
     """ALPHA_RUN_MODE 生产安全锁：用 Mock 替换 _pool/_redis，验证 LIVE 模式

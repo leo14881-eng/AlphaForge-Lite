@@ -53,9 +53,22 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_db_path(db_path_arg: str) -> Path:
+    """
+    只给了裸文件名（如 "foo.db"）时，落在既有 database/ 目录下，
+    与项目现有约定保持一致；给了路径（含目录部分）则原样使用。
+
+    【全局扫描修复】原来只判断 candidate.parent == Path(".")——但
+    Path("..").parent 和 Path(".").parent 也都等于 Path(".")（已用脚本
+    验证），会把 --db-path ".." 误判成"裸文件名"，拼出
+    DB_PATH.parent / ".." 逃出预期的 database 目录。--init-db 会基于
+    这个路径尝试删除 .db/-wal/-shm/-journal 几个文件，虽然实际拼出的
+    文件名（如 "..-wal"）在真实场景下几乎不会存在、不会真的删掉东西，
+    但这个分类逻辑本身是错的，不应该依赖"恰好不会撞上真实文件"这种
+    侥幸。显式排除 "." / ".." 这两个特殊路径分量，不当作裸文件名处理。
+    """
     candidate = Path(db_path_arg)
-    if candidate.parent == Path("."):
-        # 只给了裸文件名，落在既有 database/ 目录下，与项目现有约定保持一致
+    is_bare_filename = candidate.parent == Path(".") and candidate.name not in ("", ".", "..")
+    if is_bare_filename:
         return DB_PATH.parent / candidate.name
     return candidate
 

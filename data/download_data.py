@@ -45,25 +45,17 @@ except ImportError as exc:  # pragma: no cover - 环境提示，非业务逻辑
         "缺少 ccxt 依赖，请先运行: pip install ccxt"
     ) from exc
 
+from config.asset_profiles import MAINSTREAM_SYMBOLS_CCXT as MAINSTREAM_SYMBOLS
 from config.settings import RAW_DATA_DIR
 from detectors.cs_score import REQUIRED_COLUMNS
 
 # 主流稳健资产池（v0.6 起沿用，run_tuning.py / run_regression_check.py
-# 的历史校准结果均基于这个池子，新增 EPIC_POOL 不会改变这份列表本身）
-MAINSTREAM_SYMBOLS: tuple[str, ...] = (
-    "BTC/USDT",
-    "ETH/USDT",
-    "SOL/USDT",
-    "BNB/USDT",
-    "LINK/USDT",
-    "ADA/USDT",
-    "XRP/USDT",
-    "DOGE/USDT",
-    "AVAX/USDT",
-    "DOT/USDT",
-    "LTC/USDT",
-    "TRX/USDT",
-)
+# 的历史校准结果均基于这个池子，新增 EPIC_POOL 不会改变这份列表本身）。
+#
+# 【全局扫描修复】不再本地硬编码一份 ccxt 斜杠格式的列表——改从
+# config.asset_profiles.MAINSTREAM_SYMBOLS_CCXT 导入（由该模块唯一权威
+# 的 MAINSTREAM_SYMBOLS 自动转换出 "BTC/USDT" 格式），避免这份清单在
+# 四个文件里各自维护导致以后漂移不一致。
 
 # 第六阶段新增：15 个"史诗级妖币/神币"资产池，覆盖高爆发、剧烈洗盘乃至
 # 归零的极端行情（v0.9 引入）。"币安人生"是 Binance 上真实存在的现货

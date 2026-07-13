@@ -129,3 +129,26 @@ def test_end_to_end_pipeline_runs_and_reports(tmp_path, memory_db, capsys):
     captured = capsys.readouterr()
     assert "AlphaForge-Lite 回测复盘报告" in captured.out
     assert run_row.run_id in captured.out
+
+
+def test_runner_rejects_empty_data_after_symbol_filter(tmp_path, memory_db):
+    """
+    全局扫描修复：config.symbols 过滤后数据为空时，应该在构造阶段就
+    显式拒绝（ValueError），不能让空表一路传到 run() 里——
+    self.data["timestamp"].min() 在空表上会静默返回 NaT，NaT 会被传给
+    BacktestRun.create(data_start_ts=...) 落库，这是一个本该在配置校验
+    阶段就被拒绝的错误配置。
+    """
+    csv_path = tmp_path / "synthetic_wide_table.csv"
+    _make_synthetic_csv(csv_path)
+    df = DataLoader().load_path(csv_path)
+
+    config = BacktestConfig(
+        strategy_name="non_consensus_accumulation",
+        strategy_version="test",
+        data_source=str(csv_path),
+        symbols=["THIS_SYMBOL_DOES_NOT_EXIST"],
+    )
+
+    with pytest.raises(ValueError, match="过滤后数据集为空"):
+        BacktestRunner(data=df, config=config)

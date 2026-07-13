@@ -226,32 +226,38 @@ LONG_WINDOW_SECONDS = 60
 VOTE_WINDOWS_SECONDS: tuple[int, ...] = (SHORT_WINDOW_SECONDS, MID_WINDOW_SECONDS, LONG_WINDOW_SECONDS)
 MAJORITY_NEEDED = 2  # 3 档窗口里至少 2 档同向共振才算合约触网
 
-# 【合约独有币种的二次补偿校验——建仓/离场必须拆开，不能共用一套门槛】
-# 没有现货可交叉验证的资产（如 1000PEPEUSDT/GOATUSDT），"现货大单确认"
-# 这道防线结构性不适用，用合约侧自身更强的确定性做补偿。但"建仓要严、
-# 离场要松"是两码事：建仓误判只是错过一次机会，离场误判（真正暴跌/
-# 归零时卡在"已经是活跃领导者"退不出来）是实打实的亏损扩大。两套门槛
-# 因此完全独立：
+# 【建仓/离场必须拆开，不能共用一套门槛——对情况A(有现货)和情况B(合约
+# 独有)都成立】"建仓要严、离场要松"不是合约独有资产的特殊待遇，是通用
+# 风控原则：建仓误判只是错过一次机会，离场误判（真正暴跌/归零时卡在
+# "已经是活跃领导者"退不出来）是实打实的亏损扩大，这条原则跟有没有
+# 现货可交叉验证无关。上一版只给情况B做了这个拆分，情况A的 EXIT 还在
+# 用跟 DISCOVERY 一样的门槛——复查时发现这样反而更别扭：结构性风险
+# 更高的合约独有资产离场更容易，风险更低的主流资产离场更难。现在两种
+# 情况的离场都统一用同一套放宽门槛，情况A额外保留现货确认（因为现货
+# 市场真实存在、信息可用，不是额外加严，是不浪费已有信息）。
 #
-# 建仓（DISCOVERY）——维持严格，防误判：
-#   1. 量能放大门槛在原有 1.8 倍基础上再提高 30%（约 2.34 倍）
-#   2. 多数票要求从"3 档窗口里 2 档同意即可"提高到"3 档窗口全部一致"
-#
-# 离场（EXIT）——大幅放宽，宁可错杀也别错过真正的暴跌/归零：
+# 离场（EXIT，情况A/情况B通用）——大幅放宽，宁可错杀也别错过真正的
+# 暴跌/归零：
 #   1. 量能门槛直接用 1.0（不要求放量，只要达到基线速率推算值即可）
 #   2. 多数票维持常规"3 档窗口 2 档同意"（不要求全部一致，真实暴跌
 #      往往是跳空式下砸，不同窗口量能表现不均匀，"全部一致"反而会让
 #      离场信号更难触发）
+EXIT_VOLUME_MULTIPLIER = 1.0
+EXIT_MAJORITY_NEEDED = MAJORITY_NEEDED
+
+# 建仓（DISCOVERY，仅情况B/合约独有资产）——维持严格，防误判：
+#   1. 量能放大门槛在原有 1.8 倍基础上再提高 30%（约 2.34 倍）
+#   2. 多数票要求从"3 档窗口里 2 档同意即可"提高到"3 档窗口全部一致"
+# 情况A的建仓沿用最基础的 window.resonance() 默认门槛（VOLUME_RESONANCE_
+# MULTIPLIER/MAJORITY_NEEDED），不需要额外常量。
 #
-# TODO: 这两组数字（1.3/1.0 倍数、majority 档位）目前都是经验值，没有
+# TODO: 这几组数字（1.3/1.0 倍数、majority 档位）目前都是经验值，没有
 # 经过网格扫描或历史数据回测校准——跟 divergence_windows/confirm_streak
 # 是同一类"盲盒拍脑袋"参数。留待 backtest 轨道补上样本外滚动验证框架
-# 之后，再用同样的方法论重新校准这两组数字，不要在没有验证的情况下
+# 之后，再用同样的方法论重新校准这几组数字，不要在没有验证的情况下
 # 直接当成"调好的参数"使用。
 CONTRACT_ONLY_DISCOVERY_VOLUME_MULTIPLIER_BONUS = 1.3
 CONTRACT_ONLY_DISCOVERY_MAJORITY_NEEDED = len(VOTE_WINDOWS_SECONDS)
-CONTRACT_ONLY_EXIT_VOLUME_MULTIPLIER = 1.0
-CONTRACT_ONLY_EXIT_MAJORITY_NEEDED = MAJORITY_NEEDED
 
 # 基线成交量速率的统计窗口，必须比最长的判定窗口更长，保证基线本身有
 # 足够样本、不会被判定窗口自己的突发放量污染
@@ -328,23 +334,50 @@ class TickWindow:
     """
     单个资产的合约逐笔成交滑动窗口，按**真实时间**（不是 tick 数量）维护
     数据与判定基线，见模块顶部"重构记录：时间尺度断层修复"。
+
+    【全局扫描性能修复】self._volume_sum 是增量维护的成交量总和（push/
+    淘汰时同步加减），不再每次 vote() 都对整个 buffer 重新跑一遍
+    sum()——实测过缓冲区打满（5000 tick）时单次 resonance() 调用（内部
+    连续 3 次全量 sum()）耗时约 3 毫秒，在 530 标的全市场规模下，这是
+    纯同步、不会让出事件循环的计算，很可能是曾经观察到的一次
+    WebSocket ping 超时断线的真实成因。改成增量维护后单次 vote() 里的
+    基线速率计算是 O(1)，resonance() 还额外把"基线速率"提到外层只算
+    一次（原来 3 个窗口各自独立重复计算同一个值）。
     """
 
     def __init__(self, maxlen: int = TICK_BUFFER_MAXLEN):
-        self.trades: deque[Tick] = deque(maxlen=maxlen)
+        # 不用 deque 自带的 maxlen 参数——deque 满了之后的自动淘汰不会
+        # 经过下面的 _volume_sum 增量维护逻辑，会让这个累加和悄悄产生
+        # 漂移（多算了被自动淘汰掉的那些 tick 的 qty）。改成自己在 push()
+        # 里手动控制硬上限淘汰，跟时间淘汰走同一条路径。
+        self._maxlen = maxlen
+        self.trades: deque[Tick] = deque()
+        self._volume_sum: float = 0.0
 
     def push(self, tick: Tick) -> None:
         self.trades.append(tick)
+        self._volume_sum += tick.qty
         self._evict_stale()
+        while len(self.trades) > self._maxlen:
+            self._pop_oldest()
+
+    def _pop_oldest(self) -> None:
+        evicted = self.trades.popleft()
+        self._volume_sum -= evicted.qty
 
     def _evict_stale(self) -> None:
         if not self.trades:
             return
         cutoff_ms = self.trades[-1].ts_ms - BASELINE_WINDOW_SECONDS * 1000
         while self.trades and self.trades[0].ts_ms < cutoff_ms:
-            self.trades.popleft()
+            self._pop_oldest()
 
-    def vote(self, window_seconds: int, volume_multiplier: float = VOLUME_RESONANCE_MULTIPLIER) -> int:
+    def vote(
+        self,
+        window_seconds: int,
+        volume_multiplier: float = VOLUME_RESONANCE_MULTIPLIER,
+        baseline_volume_rate: float | None = None,
+    ) -> int:
         """
         单个时间窗口尺度的独立投票：+1 买方共振 / -1 卖方共振 / 0 未共振。
         基线是"过去 BASELINE_WINDOW_SECONDS 秒内的成交量速率（qty/秒）"，
@@ -352,9 +385,13 @@ class TickWindow:
         量"，跟窗口内实际成交量比较——同一个物理时间尺度下的速率对比，
         不受行情节奏（深夜横盘 vs 暴动闪崩）影响。
 
+        baseline_volume_rate 可选传入（resonance() 算一次、传给三个窗口
+        复用，避免重复计算）；单独调用 vote()（比如测试里）不传的话会
+        自己算一次，行为跟以前完全一致。
+
         volume_multiplier 可调：合约独有、没有现货交叉验证的资产用更高
-        的倍数（见 CONTRACT_ONLY_DISCOVERY_VOLUME_MULTIPLIER_BONUS/CONTRACT_ONLY_EXIT_VOLUME_MULTIPLIER），作为
-        补偿校验的一部分。
+        的倍数（见 CONTRACT_ONLY_DISCOVERY_VOLUME_MULTIPLIER_BONUS/
+        CONTRACT_ONLY_EXIT_VOLUME_MULTIPLIER），作为补偿校验的一部分。
         """
         if len(self.trades) < 2:
             return 0
@@ -365,10 +402,11 @@ class TickWindow:
         if len(recent_trades) < 2:
             return 0
 
-        baseline_span_seconds = (all_trades[-1].ts_ms - all_trades[0].ts_ms) / 1000
-        if baseline_span_seconds <= 0:
-            return 0
-        baseline_volume_rate = sum(t.qty for t in all_trades) / baseline_span_seconds
+        if baseline_volume_rate is None:
+            baseline_span_seconds = (all_trades[-1].ts_ms - all_trades[0].ts_ms) / 1000
+            if baseline_span_seconds <= 0:
+                return 0
+            baseline_volume_rate = self._volume_sum / baseline_span_seconds
 
         recent_volume = sum(t.qty for t in recent_trades)
         expected_recent_volume = baseline_volume_rate * window_seconds
@@ -393,7 +431,19 @@ class TickWindow:
         （全窗口一致，建仓/离场各自独立门槛），见
         CONTRACT_ONLY_DISCOVERY_VOLUME_MULTIPLIER_BONUS/CONTRACT_ONLY_EXIT_VOLUME_MULTIPLIER。
         """
-        votes = [self.vote(w, volume_multiplier=volume_multiplier) for w in VOTE_WINDOWS_SECONDS]
+        if len(self.trades) < 2:
+            return 0
+        baseline_span_seconds = (self.trades[-1].ts_ms - self.trades[0].ts_ms) / 1000
+        if baseline_span_seconds <= 0:
+            return 0
+        # 三个窗口共用同一个基线速率，只算一次（原来是三个窗口各自独立
+        # 重复计算同一个值，见类顶部"全局扫描性能修复"说明）
+        baseline_volume_rate = self._volume_sum / baseline_span_seconds
+
+        votes = [
+            self.vote(w, volume_multiplier=volume_multiplier, baseline_volume_rate=baseline_volume_rate)
+            for w in VOTE_WINDOWS_SECONDS
+        ]
         buy_votes = sum(1 for v in votes if v == 1)
         sell_votes = sum(1 for v in votes if v == -1)
         if buy_votes >= majority_needed:
@@ -650,27 +700,27 @@ class MarketMonitor:
         window.push(tick)
 
         is_contract_only = symbol in self.contract_only_symbols
-        if is_contract_only:
-            # 情况B：没有现货可交叉验证。用"当前是否已经是活跃领导者"
-            # 决定这次要判定的是建仓还是离场——这个信息在算共振之前就
-            # 已经知道，不需要先算出 direction 再反过来判断（direction
-            # 的正负本来就是由这里选的门槛决定的，不能倒因为果）。
-            if symbol in self.active_leaders:
-                # 已经持仓，这次是"要不要离场"——门槛大幅放宽，宁可
-                # 错杀也别错过真正的暴跌/归零。
-                direction = window.resonance(
-                    volume_multiplier=CONTRACT_ONLY_EXIT_VOLUME_MULTIPLIER,
-                    majority_needed=CONTRACT_ONLY_EXIT_MAJORITY_NEEDED,
-                )
-            else:
-                # 还没持仓，这次是"要不要建仓"——门槛维持严格，防止把
-                # 噪声误判成真实资金聚集。
-                direction = window.resonance(
-                    volume_multiplier=VOLUME_RESONANCE_MULTIPLIER * CONTRACT_ONLY_DISCOVERY_VOLUME_MULTIPLIER_BONUS,
-                    majority_needed=CONTRACT_ONLY_DISCOVERY_MAJORITY_NEEDED,
-                )
+        # 用"当前是否已经是活跃领导者"决定这次要判定的是建仓还是离场——
+        # 这个信息在算共振之前就已经知道，不需要先算出 direction 再反过
+        # 来判断（direction 的正负本来就是由这里选的门槛决定的，不能倒
+        # 因为果）。离场门槛对情况A/情况B统一放宽，建仓门槛按是否有现货
+        # 分两条路。
+        if symbol in self.active_leaders:
+            # 已经持仓，这次是"要不要离场"——门槛大幅放宽，宁可错杀也
+            # 别错过真正的暴跌/归零，情况A/情况B都用同一套放宽门槛。
+            direction = window.resonance(
+                volume_multiplier=EXIT_VOLUME_MULTIPLIER,
+                majority_needed=EXIT_MAJORITY_NEEDED,
+            )
+        elif is_contract_only:
+            # 还没持仓、情况B（合约独有）——门槛维持严格，防止把噪声
+            # 误判成真实资金聚集。
+            direction = window.resonance(
+                volume_multiplier=VOLUME_RESONANCE_MULTIPLIER * CONTRACT_ONLY_DISCOVERY_VOLUME_MULTIPLIER_BONUS,
+                majority_needed=CONTRACT_ONLY_DISCOVERY_MAJORITY_NEEDED,
+            )
         else:
-            # 情况A：有现货可交叉验证，走原有的常规门槛
+            # 还没持仓、情况A（有现货）——走最基础的常规门槛
             direction = window.resonance()
         if direction == 0:
             return

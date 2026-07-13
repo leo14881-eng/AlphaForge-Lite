@@ -113,6 +113,9 @@ class StateMachineEngine:
         hysteresis_window: 进入 SEED / DISCOVERY 所需的连续达标时间步数。
             出厂默认值 2 是用 run_tuning.py 在真实历史数据上做网格扫描
             后的实测最优结果，详见 project_manifest.md v0.7/v0.8 快照。
+            注意：判定用的门槛是"当期"波动率自适应缩放出来的，回看的是
+            "历史各期原始得分"，不是"历史各期各自当期的门槛"——完整说明
+            见 _confirmed_above 的实现注释。
         vol_scale_min / vol_scale_max: 波动率自适应缩放系数的裁剪区间，
             防止极端波动率把门槛缩放到不合理的范围。
         crowding_alert_threshold: crowding_penalty 低于该值视为"本期拥挤"。
@@ -461,6 +464,25 @@ class StateMachineEngine:
         history.append(score)
 
     def _confirmed_above(self, asset_id: str, threshold: float) -> bool:
+        """
+        判定最近 hysteresis_window 期的**原始** CS 得分是否全部达到给定门槛。
+
+        【行为说明，全局扫描复查后补充】threshold 参数是本次调用时用
+        **当期** market_atr_ratio 缩放出来的门槛（见 _decide_target_stage
+        里的 seed_th/discovery_th 计算），而 self._score_history 里存的是
+        **历史各期未经任何阈值相关变换的原始 cs_score**——也就是说，这里
+        实际做的是"用今天的波动率自适应门槛，去反查过去 N 期的原始得分
+        是否也达标"，而不是"过去 N 期各自用自己那期的门槛分别判定"。
+
+        这是刻意的实现，不是遗漏：如果改成"每期用当期自己的门槛"，需要
+        额外持久化每期的 atr_ratio/门槛值，且语义会变成"过去 N 期，每期
+        都各自达标"，跟当前"用当下的判断标准回看这段时间是否稳定达标"
+        是两种不同的策略语义，哪种更合理属于方法论层面的选择，不是这里
+        能单方面改的 bug——如果未来市场波动率在这 N 期内变化明显，两种
+        实现会给出不同结果，这一点需要调用方/Reviewer 知悉。回归测试见
+        tests/test_state_machine_engine.py::
+        test_confirmed_above_uses_latest_threshold_not_historical_thresholds。
+        """
         history = self._score_history.get(asset_id)
         if history is None or len(history) < self.hysteresis_window:
             return False

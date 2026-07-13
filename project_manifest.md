@@ -698,4 +698,125 @@ Walk-Forward 样本外验证、CORE/MEME 分类权重的资产生命周期错配
         （8 个活跃领导者、1 个今日退出），验证全市场覆盖后确实能捕捉到
         真实共振信号。
 
+---
+
+## 九、全局漏洞扫描 + 两处修复（本轮新增）
+
+一次覆盖 live_monitor/integration（自查）+ backtest/detectors/state_machine/
+config/database/api（fork 独立扫描）的全局排查，发现 6 项问题，本轮修复
+了其中优先级最高的 2 项：
+
+- [x] **修复：`api/app.py` 路径穿越/任意文件读取漏洞**。原实现
+      `_load_data()` 只要 `path.exists()` 就放行走不受目录限制的
+      `DataLoader.load_path()`，只要传入的相对路径在服务器上恰好存在
+      （如 `"../../../etc/passwd"`）就能绕过 `RAW_DATA_DIR` 限制。已改为
+      `Path.resolve() + relative_to()` 严格校验解析后的绝对路径确实落在
+      `RAW_DATA_DIR` 内，同时防住相对路径穿越和直接传绝对路径两种绕过
+      方式。`tests/test_api.py` 新增路径穿越/越界绝对路径两组回归测试，
+      原有测试改用 `RAW_DATA_DIR` 内的临时文件（不再用目录外的
+      `tmp_path`，因为新校验会正确拒绝它）。
+- [x] **修复：live_monitor 情况A(有现货)的 EXIT 门槛不一致问题**。上一轮
+      只给情况B（合约独有资产）做了"建仓严、离场松"的拆分，情况A的
+      EXIT 还在跟 DISCOVERY 共用同一套常规门槛——复查发现这样反而是
+      风险更高的合约独有资产离场更容易、风险更低的主流资产离场更难，
+      逻辑反了。现在"离场用统一放宽门槛（量能x1.0、常规多数）"对情况
+      A/情况B都成立，情况A额外保留现货确认（现货市场真实存在、信息
+      可用，不是加严，是不浪费已有信息）。新增 2 项测试验证：情况A的
+      EXIT 现在确实能被"够不着常规 1.8 倍门槛、但够 1.0 倍放宽门槛"的
+      中等放量强度触发。
+- [x] **单元测试总计 74 项全部通过**（70 + 本轮新增 4 项：2 项路径穿越
+      回归测试 + 2 项 EXIT 门槛一致性测试）。
+
+**扫描中发现、本轮未修复的 4 项**（按严重程度）：
+1. `state_machine/engine.py` 迟滞窗口用"今日阈值"倒查"历史得分"，行为
+   未文档化，不算错误但容易被误解维护
+2. `TickWindow.resonance()` 在缓冲区打满（5000 tick）时单次耗时约 3
+   毫秒、纯同步阻塞事件循环，很可能是之前那次 WebSocket ping 超时断线
+   的真实成因（已用 `timeit` 实测验证，未修复——优化方向是把 `sum()`
+   全量重算改成维护增量累加和，需要更大改动，留待下一轮）
+3. `backtest/runner.py` 在 `symbols` 过滤后数据为空时缺少防御，`NaT`
+   会一路传到落库层，只验证到 pandas 层不报错，peewee/SQLite 层实际
+   行为未验证
+4. `detectors/cs_score.py` 结尾按位置对齐回填 symbol 列，依赖
+   `groupby.apply()` 输出顺序这个隐含假设，没有回归测试守护
+
+**扫描未覆盖的模块**（fork 明确说明未及深入）：`run_tuning.py`/
+`run_regression_check.py`/`run_meme_stress_test.py`/`data/download_data.py`/
+`main.py`/`config/asset_profiles.py`，需要后续单独再扫一轮。
+
+- [x] **补充修复：剩余 4 项全部处理完毕**：
+      1. `state_machine/engine.py::_confirmed_above` 的"今日阈值倒查历史
+         得分"行为——判定这是刻意的策略语义、不是 bug，不单方面改动，
+         补充了详细的实现注释 + `hysteresis_window` 字段文档说明，新增
+         `test_confirmed_above_uses_latest_threshold_not_historical_
+         thresholds` 回归测试把这个行为显式锁定下来，避免以后被误当
+         成 bug 悄悄改掉。
+      2. `TickWindow` 性能优化：`self._volume_sum` 改成增量维护（push/
+         淘汰时同步加减，注意手动接管了 deque 的淘汰路径，避免
+         `deque(maxlen=...)` 自动淘汰绕过增量维护导致累加和漂移）；
+         `resonance()` 把"基线速率"提到外层只算一次，不再让 3 个窗口
+         各自重复计算同一个值。实测：满 5000 tick 缓冲、tick 铺满整个
+         300 秒基线窗口的真实场景下，单次 `resonance()` 耗时从约 3.04
+         毫秒降到约 1.05 毫秒（2.5x）。未完全归零——"最近 N 秒窗口"
+         筛选（尤其 60 秒长窗口）仍需要扫一部分缓冲区，要继续优化需要
+         维护每个窗口各自的增量累加和或引入二分查找，改动更大，留待
+         后续视实际运行情况决定是否需要。
+      3. `backtest/runner.py::BacktestRunner.__init__` 新增空数据集
+         早期显式拒绝（`ValueError`），`symbols` 过滤后数据为空时不再
+         让 `NaT` 一路传到落库层。新增
+         `test_runner_rejects_empty_data_after_symbol_filter` 回归测试。
+      4. `detectors/cs_score.py::calculate_cs` 不再在最后按"整体输出
+         顺序位置对齐"拼回 symbol 列（这个隐含假设一旦被打破会静默
+         产生错位标签、不会报错）——改成在 `_compute_for_symbol` 内部
+         （此时 symbol 是确定、正确的分组上下文）直接把 symbol 写回
+         每一行，天然跟随、不依赖任何整体顺序假设。新增
+         `test_symbol_column_stays_correctly_aligned_with_shuffled_
+         unequal_groups` 回归测试（非字典序 symbol + 不等长分组 + 输入
+         行随机打乱，核对 (symbol, timestamp) 外键关系没有错位）。
+- [x] **单元测试总计 77 项全部通过**（74 + 本轮新增 3 项）。
+
+---
+
+## 十、全局扫描第二轮：剩余 6 个文件补扫 + 2 项修复（本轮新增）
+
+fork 补扫了上一轮没覆盖的 `run_tuning.py`/`run_regression_check.py`/
+`run_meme_stress_test.py`/`data/download_data.py`/`main.py`/
+`config/asset_profiles.py`，发现 4 项问题，本轮修复了其中 2 项：
+
+- [x] **修复：`MAINSTREAM_SYMBOLS`（12 个主流资产清单）四处重复硬编码
+      统一为单一权威来源**。此前 `data/download_data.py`（ccxt 斜杠
+      格式）/`run_tuning.py`/`run_regression_check.py`（内部无斜杠
+      格式）/`config/asset_profiles.py::ASSET_PROFILE_MAP`（隐含在
+      CORE 分类里）四处各自独立维护同一份清单，fork 写脚本验证过当时
+      恰好一致，但没有任何机制保证以后不会漂移。现在
+      `config/asset_profiles.py` 是唯一权威来源（新增
+      `MAINSTREAM_SYMBOLS` 规范格式常量 + `MAINSTREAM_SYMBOLS_CCXT`
+      自动转换出的 ccxt 格式常量），`run_tuning.py`/
+      `run_regression_check.py`/`data/download_data.py` 三处改成直接
+      `import`，`ASSET_PROFILE_MAP` 的 CORE 部分也从
+      `MAINSTREAM_SYMBOLS` 展开生成，不再重复罗列。新增
+      `test_mainstream_symbols_consistent_across_all_consumers` 回归
+      测试（验证三处 import 的确实是同一个对象、ccxt 格式转换正确、
+      `ASSET_PROFILE_MAP` 里 CORE 集合与 `MAINSTREAM_SYMBOLS` 完全一致）。
+- [x] **修复：`main.py::_resolve_db_path` 对 `..`/`.` 的误判**。原判断
+      `candidate.parent == Path(".")` 对 `Path("..")` 和 `Path(".")`
+      同样成立（已用脚本验证），会把 `--db-path ".."` 误判成"裸文件名"，
+      拼出 `DB_PATH.parent / ".."` 逃出预期的 `database/` 目录（实际
+      危害有限——`--init-db` 拼出的删除目标文件名如 `"..-wal"` 在真实
+      场景下几乎不存在，不会真的删掉东西，但分类逻辑本身是错的，不该
+      靠"侥幸不撞上真实文件"兜底）。已显式排除 `.`/`..` 这两个特殊路径
+      分量。新增 `tests/test_main.py`（5 项，main.py 此前零测试覆盖），
+      专门覆盖这个边界情况 + 正常裸文件名/显式路径/多层穿越路径的
+      对照场景。
+- [x] **单元测试总计 83 项全部通过**（77 + 本轮新增 6 项）。
+
+**扫描中发现、本轮未修复的 2 项**：
+1. `data/download_data.py` 分页下载中途网络异常会丢弃整个 symbol 已
+   下载的数据，没有重试/断点续传机制（中等优先级，需要真实网络条件
+   才能验证触发场景）
+2. `run_meme_stress_test.py`/`main.py` 缺少测试文件（`main.py` 这轮
+   补了一个聚焦 `_resolve_db_path` 的测试文件，`run_meme_stress_test.py`
+   仍然是零覆盖；其"核心审判结论"依据的索引算术函数只做过代码走读，
+   没有写脚本实测验证边界情况）
+
 > 本清单将随每个迭代版本更新，作为 Chief Reviewer 审查项目进展的固定参照物。

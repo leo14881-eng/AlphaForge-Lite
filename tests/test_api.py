@@ -10,6 +10,7 @@ import peewee as pw
 import pytest
 from fastapi.testclient import TestClient
 
+from config.settings import RAW_DATA_DIR
 from database.models import MODELS
 from database.models import db as peewee_db
 
@@ -58,11 +59,21 @@ def client(api_db):
         yield test_client
 
 
-def test_full_run_lifecycle_via_http(tmp_path, client):
-    csv_path = tmp_path / "api_wide_table.csv"
+@pytest.fixture()
+def raw_dir_csv():
+    """
+    _load_data() 现在把 data_source 严格限定在 RAW_DATA_DIR 目录内（见
+    api/app.py 的安全修复记录），测试数据必须真的写在这个目录下，不能
+    再用 tmp_path 那种目录外的路径——用完即删，不污染真实的 data/raw/。
+    """
+    csv_path = RAW_DATA_DIR / "_test_api_wide_table.csv"
     _make_synthetic_csv(csv_path)
+    yield csv_path.name
+    csv_path.unlink(missing_ok=True)
 
-    create_resp = client.post("/runs", json={"data_source": str(csv_path)})
+
+def test_full_run_lifecycle_via_http(raw_dir_csv, client):
+    create_resp = client.post("/runs", json={"data_source": raw_dir_csv})
     assert create_resp.status_code == 200
     body = create_resp.json()
     assert body["status"] == "SUCCESS"
@@ -92,3 +103,34 @@ def test_get_unknown_run_returns_404(client):
 def test_create_run_with_missing_file_returns_400(client):
     resp = client.post("/runs", json={"data_source": "definitely_missing.csv"})
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "malicious_data_source",
+    [
+        "../../../../etc/passwd",  # 相对路径穿越
+        "..\\..\\..\\Windows\\win.ini",  # Windows 风格路径穿越
+    ],
+)
+def test_create_run_rejects_path_traversal(client, malicious_data_source, tmp_path):
+    """
+    安全回归测试：data_source 不能通过 ".." 穿越到 RAW_DATA_DIR 之外。
+    用一个真实存在于目录外、但不满足业务 schema 的文件验证——如果穿越
+    防护失效，会先在读文件这步失败（ValueError/FileNotFoundError 一样
+    是 400），但我们要的是"根本不该尝试读目录外的文件"这个更早的拒绝，
+    用越界后仍然可能命中的真实文件路径来确保测的是路径校验本身，不是
+    凑巧文件不存在导致的 400。
+    """
+    resp = client.post("/runs", json={"data_source": malicious_data_source})
+    assert resp.status_code == 400
+    assert "不允许越界访问" in resp.json()["detail"]
+
+
+def test_create_run_rejects_absolute_path_outside_raw_dir(client, tmp_path):
+    """绝对路径同样必须落在 RAW_DATA_DIR 内才允许，不能靠传绝对路径绕过限制"""
+    outside_csv = tmp_path / "outside_raw_dir.csv"
+    _make_synthetic_csv(outside_csv)
+
+    resp = client.post("/runs", json={"data_source": str(outside_csv)})
+    assert resp.status_code == 400
+    assert "不允许越界访问" in resp.json()["detail"]

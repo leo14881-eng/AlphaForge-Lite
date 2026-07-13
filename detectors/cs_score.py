@@ -147,7 +147,6 @@ class CCSDetector:
         result = working.groupby("symbol", group_keys=False).apply(
             self._compute_for_symbol, include_groups=False
         )
-        result["symbol"] = working.sort_values(["symbol", "timestamp"])["symbol"].to_numpy()
         return result.drop(columns=["_ret", "_bench_index", "_price_index"]).reset_index(drop=True)
 
     def _compute_for_symbol(self, group: pd.DataFrame) -> pd.DataFrame:
@@ -157,6 +156,16 @@ class CCSDetector:
         # （曾经因为在 .copy() 之后读取而踩过这个坑，此处特意提前）。
         symbol = group.name
         group = group.copy()
+
+        # 【全局扫描修复】以前是在 calculate_cs() 里，回填完全部分组之后，
+        # 用 working.sort_values(...)["symbol"].to_numpy() 按"位置"把
+        # symbol 列拼回去——隐含假设"groupby(...).apply() 的输出行序，
+        # 跟 working 重新排序后的行序完全一致"，一旦 pandas 版本升级改变
+        # 了内部实现细节，或者这个函数以后被改动到会调整返回行数/行序，
+        # 会在不报错的情况下产生错位的 symbol 标签。改成在这里（每个分组
+        # 内部，此时 symbol 是确定、正确的）直接把 symbol 写回去，天然
+        # 跟随每一行走、不依赖任何"整体输出顺序"的隐含假设。
+        group["symbol"] = symbol
 
         # ------- 组件 A：delta2_rs（二阶相对强度加速度） -------
         rs_slope = self._rolling_ols_slope(group["rs"], self.rs_slope_window)
