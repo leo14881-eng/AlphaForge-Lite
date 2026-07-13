@@ -21,6 +21,16 @@ def reset_singleton():
     SignalLauncher._instance = None
 
 
+@pytest.fixture(autouse=True)
+def live_mode(monkeypatch):
+    """
+    默认给所有测试开启 LIVE 模式，模拟"已经过安全确认的真实生产环境"，
+    这样下面测试重试/超时/成功路径的用例不会被新加的生产安全锁挡在
+    最前面。专门测试安全锁本身的用例会自行覆盖/清除这个环境变量。
+    """
+    monkeypatch.setenv("ALPHA_RUN_MODE", "LIVE")
+
+
 def test_launch_success_sends_correct_payload(launcher):
     mock_response = MagicMock(status_code=200, text="OK")
     with patch.object(launcher._session, "post", return_value=mock_response) as mock_post:
@@ -90,6 +100,24 @@ def test_launch_unexpected_exception_does_not_propagate_and_does_not_retry(launc
 
     assert result is False
     mock_post.assert_called_once()  # 未知异常不重试
+
+
+def test_launch_blocked_when_run_mode_env_missing(launcher, monkeypatch):
+    monkeypatch.delenv("ALPHA_RUN_MODE", raising=False)
+    with patch.object(launcher._session, "post") as mock_post:
+        result = launcher.launch("BTCUSDT", "EXIT")
+
+    assert result is False
+    mock_post.assert_not_called()  # 安全锁在最前面拦下，根本不该发起网络请求
+
+
+def test_launch_blocked_when_run_mode_env_has_wrong_value(launcher, monkeypatch):
+    monkeypatch.setenv("ALPHA_RUN_MODE", "BACKTEST")
+    with patch.object(launcher._session, "post") as mock_post:
+        result = launcher.launch("BTCUSDT", "EXIT")
+
+    assert result is False
+    mock_post.assert_not_called()
 
 
 def test_get_instance_returns_singleton():

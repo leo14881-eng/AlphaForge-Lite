@@ -569,7 +569,133 @@ CCS 探测算法、状态机核心、端到端回测闭环、一键 CLI、常驻
 
 **当前状态**：live_monitor 子系统的基础设施接入（MySQL 建表、Redis 升级
 + Stream 消费组）、合约数据源排障修复（aggTrade -> trade）均已完成真实
-验证，60 项单测全部通过。尚未做的是长时间（数小时级）稳定性挂机观察，
-以及真实 Java 消费端接入后的联调（Java 侧代码不在本仓库范围内）。
+验证。
+
+---
+
+## 六、market_monitor.py 生产鲁棒性重构（本轮新增）
+
+- [x] **断线重连 + 心跳保活**：`_run_stream` 外层套指数退避状态机
+      （初始 1 秒，每次失败翻倍，封顶 60 秒，连接成功后重置），防止
+      交易所 24 小时强制断线或网络抖动触发的高频重连被判定为异常流量
+      招致 IP 限流。`websockets.connect` 显式配置
+      `ping_interval=20`/`ping_timeout=10`/`max_size=4MB`（默认 1MB 上限
+      调大，防止极端行情下 combined 多流单帧过大被拒收）。
+- [x] **异步事件循环不阻塞**：`_on_futures_message`/`_on_spot_message`
+      改为 `async def`；主接收循环收到消息后用 `asyncio.create_task`
+      立刻弹射处理任务、自己马上回去 `recv()` 下一条；真正触发信号时
+      `sink.persist_and_broadcast`（同步 MySQL/Redis 写盘）用
+      `asyncio.to_thread` 隔离到线程池。弹射出去的 task 显式持有强引用
+      （`self._background_tasks` + done-callback），避免 asyncio 提前
+      垃圾回收正在执行的任务这个已知坑。**过程中发现并修复一个由此
+      引入的竞态条件**：`active_leaders` 状态更新挪到了线程 offload 的
+      `await` 之前完成——否则 `create_task` 弹射意味着同一资产可能有
+      多条消息并发在途，两条都可能在写盘期间看到"还不是活跃领导者"
+      从而重复触发同一个信号（`signal_uuid` 每次都是新 uuid4，MySQL
+      唯一键防重对这种"内容不同的重复信号"完全无效）。
+- [x] **ALPHA_RUN_MODE 生产安全锁**：`SignalSink.persist_and_broadcast`
+      与 `integration/signal_launcher.py::SignalLauncher.launch`
+      两处入口共用同一把锁——环境变量不等于 `LIVE` 就直接跳过真正的
+      落库/广播/网络请求，只记日志。信号计算逻辑本身不受影响，照常
+      运行，只是"最后一步落地"被拦住，防止误运行/单测/新成员开发时
+      污染生产 MySQL/Redis Stream 或误发信号给 Java。
+- [x] **TickWindow 时间尺度断层修复**：旧版按"最近 N 条 tick"切片短/中/
+      长窗口、基线均值对整个 `deque` 取平均——这是按 tick 数量而不是
+      按物理时间切片，深夜横盘每 60 个 tick 可能横跨 20 分钟、暴动闪崩
+      时可能只有 0.1 秒，同一套"tick 数量窗口"在两种节奏下算出的
+      "基线均值"含义不可比，会导致触发阈值在高频期/低频期错乱。已改为
+      **真实时间窗口**：短(5s)/中(20s)/长(60s) 窗口语义从"最近 N 条"
+      变成"最近 N 秒"，基线改成"过去 300 秒内的成交量速率（qty/秒）"，
+      逐笔投票时把"窗口内实际成交量"跟"基线速率 × 窗口秒数"做同一物理
+      尺度下的速率对比。
+- [x] **Redis Stream 内存增长防护**：`XADD` 加 `MAXLEN ~ 100000`（近似
+      裁剪），防止服务常驻运行数月/数年后 Stream 无限增长拖垮 Memurai
+      内存导致 OOM。
+- [x] **本地信号审计日志兜底**：`logs/live_monitor_signal_audit.log`
+      （JSON Lines，CRITICAL 级别），在尝试写 MySQL/Redis **之前**先落
+      一条本地记录，即使网络/MySQL/Redis 同时故障，只要 Python 进程
+      还活着这条记录就已经落盘，可用于人工对账补单，不会发生完全静默
+      的信号丢失。
+- [x] **【临时调试】原始 WebSocket 消息落盘**（`logs/live_monitor_
+      raw_ws_debug.log`，DEBUG 级别）：应用户要求临时加入，用于观察
+      真实收到的行情消息内容，**用户确认不需要后需要移除**，不是正式
+      功能，不要长期维护。
+- [x] **单元测试更新**：`tests/test_live_monitor.py` 的 `TickWindow`
+      测试改为真实时间戳构造（用脚本预先验证过精确数值），新增一个
+      "安静行情 vs 暴动闪崩"回归测试验证时间尺度断层确实修复；
+      `_on_futures_message` 相关测试改用 `asyncio.run()` 驱动（handler
+      现在是 async）；新增 `TestSignalSinkLiveModeGuard`（3 项）用 Mock
+      替换 `_pool`/`_redis` 验证安全锁；`tests/test_signal_launcher.py`
+      新增 2 项验证安全锁本身，其余用例加了 `live_mode` 自动 fixture
+      避免被新加的锁挡住。**单元测试总计 66 项全部通过**。
+- [x] **真实短连接冒烟测试**：不设 `ALPHA_RUN_MODE` 跑生产代码
+      `MarketMonitor.run()` 12 秒，收到 349 条真实合约 tick，后台任务
+      正确清零，调试日志正常写入 404 行，非 LIVE 模式下确认没有触发
+      信号审计日志——验证了新链路真实可用，不只是单测通过。
+
+**尚未做的**（如实说明）：长时间（数小时级）稳定性挂机观察、真实断线
+重连场景下指数退避的实际触发观察（冒烟测试窗口太短，没有真的遇到过
+断线）、真实 Java 消费端接入后的端到端联调（Java 侧代码不在本仓库
+范围内）。
+
+**本轮备忘录里提到但本次没有动的三个方法论层面问题**（明确不是
+market_monitor.py 的工程 bug，是否要处理需要 Reviewer 决策，详见
+"诚实声明"章节）：`run_tuning.py`/`run_regression_check.py` 缺少
+Walk-Forward 样本外验证、CORE/MEME 分类权重的资产生命周期错配、
+`divergence_windows`/`confirm_streak` 未经网格扫描校准——这三项都已经
+在"诚实声明"和"尚未实现"章节里如实记录为已知开放问题，本轮没有静默
+改动任何出厂默认参数。
+
+---
+
+## 七、live_monitor 全市场覆盖 + 合约独有资产二次补偿校验（本轮新增）
+
+- [x] **从 5 个样例币种扩展为币安合约全市场**：`fetch_live_symbol_universe()`
+      在 `main()` 启动时动态拉取合约 USDT 本位永续 TRADING 状态全量
+      symbol（实测 530 个）与现货 TRADING 状态 symbol 比对，划分出
+      "有现货可交叉验证"（361 个）与"合约独有、没有现货"（169 个，如
+      `1000PEPEUSDT`/`GOATUSDT`，恰好是项目"妖币"论最关心的资产类型）。
+      拉取失败时降级使用内置小样本 `SYMBOLS`（5 个），不阻塞服务启动。
+      已用真实 API 验证：530/169 与手工验证数字一致。
+- [x] **合约独有资产的二次合约资金强度补偿校验**：`TickWindow.vote`/
+      `resonance` 新增可调参数 `volume_multiplier`/`majority_needed`。
+      情况A（有现货，361 个）走原有"合约共振 + 现货大单确认"双重验证；
+      情况B（合约独有，169 个）跳过结构性不适用的现货确认，改用更严格
+      的合约侧门槛补偿——量能放大门槛 x1.3（约 2.34 倍）+ 要求三档窗口
+      （5s/20s/60s）全部一致（不是 2/3 多数）。现货侧订阅相应收窄为只
+      订阅有真实挂牌的 361 个 symbol（合约侧订阅全量 530 个）。
+      **实测过组合流对无效流名的容错**：combined stream URL 里混入不
+      存在的现货 symbol 不会拖垮整条连接，其余有效流照常推送。
+- [x] **单元测试新增 3 项**（`TestContractOnlyAsymmetricVerification`）：
+      情况B 强共振无现货数据也能触发、情况B 常规强度（满足不了加严
+      门槛）应该拒绝触发（证明二次校验不是形同虚设）、对照组验证情况A
+      分支不受影响。**单元测试总计 69 项全部通过**。
+
+**尚未做的**：530 个 symbol 全量订阅下的真实长时间资源消耗（消息量/秒、
+内存、MySQL/Redis 写入压力）还没有做过长时间挂机观察，只做过小规模
+（5 symbol）的真实连接验证；控制台调试日志在全市场规模下会非常密集
+（之前是应用户要求临时加的，规模扩大后可能需要重新评估是否要关掉控制台
+输出、只保留文件）。
+
+---
+
+## 八、单进程统一入口（本轮新增）
+
+- [x] **`market_monitor.py` 和 `api.py` 合并为一个进程**：用户反馈"要启动
+      两个 Python 进程才能看到数据+页面"体验很奇怪，跟 Java 单一 main
+      服务的习惯不一致，已用 FastAPI 的 `lifespan` 生命周期钩子把
+      `MarketMonitor.run()` 作为后台 asyncio 任务挂到跟 REST 接口同一个
+      事件循环里。现在**一条 `uvicorn live_monitor.api:app` 命令**就能
+      同时启动数据采集 + 信号计算 + REST 接口 + 大屏页面。
+      - 抽出 `configure_logging()`/`build_monitor_from_live_universe()`
+        两个共用函数，`market_monitor.py` 独立运行（`python -m
+        live_monitor.market_monitor`，适合无图形界面、只要信号计算能力
+        的部署场景）和 `api.py` 的 lifespan 两条路径共用同一套初始化
+        逻辑，不重复。
+      - 已实测验证：单进程启动后日志确认 MySQL/Redis 连接成功、530 个
+        全市场标的拉取成功、合约/现货双流连接成功、API 与后台采集任务
+        同时正常服务；`/api/v1/signals/daily` 首次真实返回非空数据
+        （8 个活跃领导者、1 个今日退出），验证全市场覆盖后确实能捕捉到
+        真实共振信号。
 
 > 本清单将随每个迭代版本更新，作为 Chief Reviewer 审查项目进展的固定参照物。

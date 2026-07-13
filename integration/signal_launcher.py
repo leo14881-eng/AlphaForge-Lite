@@ -25,10 +25,17 @@ Java 侧真的据此下单，后果是灾难性的。本模块只应该被接入
 策略主循环"（如果/当该主循环被实现），绝不能直接混进现有的批量回测
 /参数寻优管线。详见 project_manifest.md 集成章节。
 
+**生产安全锁**：launch() 入口处会先校验环境变量 ALPHA_RUN_MODE 是否
+等于 LIVE，不是则直接返回 False、不发起任何网络请求。跟
+live_monitor/market_monitor.py::SignalSink 用的是同一把锁、同一个环境
+变量名，两处入口保持一致，防止新成员开发、本地单测、未来某个脚本
+误 import 这个模块时不小心把信号真的发给 Java 执行引擎。
+
 运行前需要安装：
     pip install requests
 
-用法（策略主循环里的单行调用，仅用于实时/真实场景，不要用于回测）：
+用法（策略主循环里的单行调用，仅用于实时/真实场景，不要用于回测；
+只有显式设置 ALPHA_RUN_MODE=LIVE 才会真正发出网络请求）：
     from integration.signal_launcher import launch_signal
     launch_signal(asset="BTCUSDT", signal_type="EXIT",
                   confirmed_windows=2, total_windows=3)
@@ -36,6 +43,7 @@ Java 侧真的据此下单，后果是灾难性的。本模块只应该被接入
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import ClassVar
@@ -47,6 +55,11 @@ logger = logging.getLogger("alphaforge.signal_launcher")
 
 # 与 Java 侧 SignalRequest DTO 对齐：signalType 只允许这两个值
 ALLOWED_SIGNAL_TYPES: frozenset[str] = frozenset({"DISCOVERY", "EXIT"})
+
+# 生产安全锁：与 live_monitor/market_monitor.py 共用同一个环境变量名/值，
+# 只有显式设置为 LIVE 才允许真正弹射信号
+LIVE_MODE_ENV_VAR = "ALPHA_RUN_MODE"
+LIVE_MODE_ENV_VALUE = "LIVE"
 
 
 @dataclass(frozen=True)
@@ -99,7 +112,18 @@ class SignalLauncher:
         发送一次信号弹射，返回是否发送成功；**永不向调用方抛出异常**——
         网络彻底断开、Java 引擎未启动、超时，都只记日志、返回 False，
         不能让 Python 策略主线程因为下游服务的问题而崩溃。
+
+        入口第一道检查：生产安全锁。ALPHA_RUN_MODE 不等于 LIVE 时直接
+        拒绝，不发起任何网络请求——防止误运行时把信号真的发给 Java。
         """
+        if os.getenv(LIVE_MODE_ENV_VAR) != LIVE_MODE_ENV_VALUE:
+            logger.warning(
+                "[SignalLauncher] 当前不是 LIVE 模式（%s 未设置为 %s），已拒绝弹射（asset=%s "
+                "signalType=%s），不发起任何网络请求",
+                LIVE_MODE_ENV_VAR, LIVE_MODE_ENV_VALUE, asset, signal_type,
+            )
+            return False
+
         if signal_type not in ALLOWED_SIGNAL_TYPES:
             logger.error(
                 "[SignalLauncher] 非法 signalType=%r，只允许 %s，已拒绝发送（asset=%s）",
