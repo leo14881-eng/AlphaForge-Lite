@@ -90,6 +90,8 @@ DEFAULT_TIMEFRAME = "1d"
 DEFAULT_OUTPUT = "crypto_market_daily.csv"
 _KLINES_PER_REQUEST = 1000  # Binance 现货 K 线单次请求上限（保守取值）
 _TURNOVER_RATE_RANGE = (0.005, 0.05)  # 换手率代理指标映射到的目标区间
+_MAX_PAGE_RETRIES = 3  # 单页分页请求失败时的最大重试次数
+_RETRY_BACKOFF_SECONDS = 2.0  # 重试退避基数（第 N 次重试等待 N 倍这个值）
 
 
 def _parse_args() -> argparse.Namespace:
@@ -127,11 +129,45 @@ def _normalize_output_symbol(market_symbol: str) -> str:
 
 
 def _fetch_symbol_ohlcv(exchange: "ccxt.Exchange", symbol: str, timeframe: str, since_ms: int, until_ms: int) -> list[list]:
-    """分页拉取单个交易对在 [since_ms, until_ms] 区间内的全部 K 线"""
+    """
+    分页拉取单个交易对在 [since_ms, until_ms] 区间内的全部 K 线。
+
+    【全局扫描修复：网络异常不再丢弃已下载的部分数据】此前任何一页
+    请求失败都会让整个函数直接抛异常，调用方 main() 的 try/except 会把
+    这个 symbol 已经拉到的若干页数据（局部变量 rows）全部丢弃、跳过
+    整个 symbol，没有任何重试。9 年日线数据每个 symbol 通常需要 3-4 次
+    分页请求，26 个 symbol 顺序执行，网络抖动概率不低，一次抖动就
+    白费前面几页已经成功的请求。现在改成：单页请求失败先重试
+    _MAX_PAGE_RETRIES 次（线性退避），仍然失败就带着已经成功拿到的
+    部分数据提前返回（不抛异常），调用方打印警告说明数据不完整。脚本
+    本身是幂等的全量重新拉取（不是增量更新），重跑一次就能自然补全，
+    "部分数据"不会导致脏数据，只是这次运行的时间覆盖范围不完整，
+    比"整个 symbol 一条数据都没有"要好得多。
+    """
     rows: list[list] = []
     cursor = since_ms
     while cursor < until_ms:
-        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=cursor, limit=_KLINES_PER_REQUEST)
+        batch: list[list] | None = None
+        for attempt in range(1, _MAX_PAGE_RETRIES + 1):
+            try:
+                batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=cursor, limit=_KLINES_PER_REQUEST)
+                break
+            except Exception as exc:
+                if attempt == _MAX_PAGE_RETRIES:
+                    print(
+                        f"[下载层] {symbol} 分页请求连续 {_MAX_PAGE_RETRIES} 次失败"
+                        f"（游标={cursor}）：{exc}；保留已拉到的 {len(rows)} 条K线，"
+                        "提前结束该资产的拉取（重跑脚本可补全缺口）",
+                        file=sys.stderr,
+                    )
+                    return [row for row in rows if row[0] <= until_ms]
+                wait_seconds = _RETRY_BACKOFF_SECONDS * attempt
+                print(
+                    f"[下载层] {symbol} 第 {attempt}/{_MAX_PAGE_RETRIES} 次分页请求失败："
+                    f"{exc}，{wait_seconds:.0f} 秒后重试",
+                    file=sys.stderr,
+                )
+                time.sleep(wait_seconds)
         if not batch:
             break
         rows.extend(batch)
