@@ -48,6 +48,7 @@ AlphaForge-Lite/
 ├── detectors/       # CCS（Capital Convergence Score）探测算法
 ├── backtest/        # 数据加载（DataLoader）+ 回测主流程（BacktestRunner）+ 复盘报表（BacktestReporter）
 ├── api/             # 可选的常驻 HTTP API 服务层（FastAPI）
+├── integration/     # 对外集成：signal_launcher.py（Python -> Java 执行端 HTTP 信号弹射，暂未接入任何现有调用路径，见 project_manifest.md 安全提醒）
 ├── logs/            # 运行日志
 ├── tests/           # 单元测试
 ├── main.py                  # 一键 CLI 入口（数据库初始化 -> 数据接入 -> 回测 -> 复盘报表）
@@ -151,6 +152,9 @@ python run_meme_stress_test.py --data crypto_market_daily.csv
 一键 CLI、常驻 HTTP API 服务、参数网格扫描工具、真实历史数据下载工具
 （主流 + 妖币资产池共 26 个交易对）、无损对比回归检查工具、妖币极限压力
 测试工具、CORE/MEME 资产画像分类权重均已完成，且已用真实数据完成参数
-校准并回填为出厂默认值，沙盒闭环已打通，单元测试 42 项全部通过。具体
+校准并回填为出厂默认值，沙盒闭环已打通。新增 `integration/signal_launcher.py`
+作为 Python -> Java 执行端的 HTTP 信号弹射通道（目前仅是待用的独立模块，
+未接入任何现有调用路径，集成前请务必先读 project_manifest.md 的安全提醒）。
+单元测试 51 项全部通过。具体
 设计、诚实的局限性说明与下一步计划见 [`project_manifest.md`](./project_manifest.md)
 的相应章节。

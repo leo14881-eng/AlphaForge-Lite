@@ -3,7 +3,7 @@
 > 项目代号：AlphaForge-Lite
 > 定位：加密资产"非共识资本聚集探测器"量化验证沙盒
 > 快照日期：2026-07-13
-> 当前阶段：多窗口共振投票 + CORE/MEME 资产画像分类权重两项防御性加固已完成，单测 42 项全部通过，准备移交 Java 执行端
+> 当前阶段：多窗口共振投票 + CORE/MEME 资产画像分类权重两项防御性加固已完成，新增 Java 执行端信号弹射通道，单测 51 项全部通过
 > 远程仓库：https://github.com/leo14881-eng/AlphaForge-Lite（`main` 分支）
 
 **封版声明**：本版本标志着 AlphaForge-Lite 沙盒"功能性闭环"的完成——
@@ -408,5 +408,51 @@ CCS 探测算法、状态机核心、端到端回测闭环、一键 CLI、常驻
 5. **订单簿/微观结构分析**：如果 Java 执行端或后续迭代确实需要这个能力，
    需要先接入 Binance 订单簿深度或逐笔成交接口，是数据源级别的扩展，
    当前日线 K 线的数据架构不支持。
+
+---
+
+## 四、Java 执行端信号对接（本轮新增，v0.95-Beta 增补）
+
+- [x] **新增 `integration/signal_launcher.py`**：Python 策略侧 -> Java
+      执行引擎（`:8088`）的 HTTP 信号弹射模块，补上此前"Python 侧完全
+      没有对外输出通道"的断层。
+      - `SignalLauncher` 类：基于 `requests.Session` 连接池复用，
+        `get_instance()` 提供线程安全的进程内单例（双重检查锁）。
+      - `launch_signal(asset, signal_type, confirmed_windows=None,
+        total_windows=None)` 模块级便捷函数，Payload 严格对齐 Java 侧
+        DTO：`asset`、`signalType`（只允许 `DISCOVERY`/`EXIT`，非法值
+        直接拒绝、不发起网络请求）、`confirmedWindows`、`totalWindows`。
+      - 健壮性：`timeout=2.0` 秒硬性红线 + 超时/连接失败各重试 1 次
+        （共 2 次尝试，最坏情况 ~4 秒后返回 `False`）；4xx/5xx 响应与
+        未预期异常不重试、直接失败退出；**所有异常路径都只记日志、
+        返回 `False`，绝不向调用方抛出**——已用真实网络请求（打一个
+        没有服务监听的端口）验证：超时后老实返回 `False`，没有卡死、
+        没有崩溃，耗时约 4.03 秒符合预期。
+      - 单测 `tests/test_signal_launcher.py`（9 项）全程 mock 网络层，
+        覆盖成功/非法信号类型/HTTP 错误状态码/超时重试/连接失败重试/
+        重试后成功/未知异常不重试/单例复用等场景。
+- [x] **单元测试总计 51 项全部通过**（42 + 本轮新增 9 项）。
+
+**⚠️ 集成时的关键安全提醒（写入代码注释与本文件两处，务必不要忽略）**：
+
+`launch_signal()` **绝不能直接接入 `backtest/runner.py::BacktestRunner`
+的批量回测循环**。原因：`BacktestRunner` 是 `run_tuning.py` /
+`run_meme_stress_test.py` / `run_regression_check.py` / `main.py --data`
+等所有批量脚本共用的核心执行路径，一次调用会在几秒内逐行重放 2017-2026
+年的历史数据、产生成千上万条状态迁移。如果把信号弹射直接挂在这个循环
+里，**每一次历史回测/参数网格扫描都会把海量"历史重放信号"当成真实
+信号打给 Java 执行引擎**——如果 Java 侧真的据此下单，后果是灾难性的。
+
+`integration/signal_launcher.py` 本身只是一个可靠的"信号搬运工"，
+**当前没有被接入代码库任何现有的调用路径**（不在 `backtest/runner.py`
+里，也不在 `main.py`/`api/app.py` 里）。AlphaForge-Lite 的 Python 侧
+截至本快照仍然是纯"本地静态历史数据回测"工具，**没有真实的实时策略
+主循环**——这是一个需要先补上的架构缺口，而不是"随便找个地方插一行
+调用"就能解决的事：真正的实时信号触发点应该是一个尚未实现的"live 主
+循环"（订阅实时行情 -> 逐 tick 跑 `StateMachineEngine.update_asset_state`
+-> 状态变为 `DISCOVERY`/`EXIT` 时调用 `launch_signal()`），而不是现有
+的批量回测入口。是否要现在就实现这个 live 主循环，建议 Reviewer 先
+确认再排期，避免和"沙盒回测 / 参数寻优"这两条已经封版的核心链路搅在
+一起。
 
 > 本清单将随每个迭代版本更新，作为 Chief Reviewer 审查项目进展的固定参照物。
